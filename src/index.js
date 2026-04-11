@@ -13,10 +13,10 @@ const BAKE_EVENT_TOPIC = '0xdfb2307530b804c690e75bb4df897c4d1ebb5e3e1187ce9e25eb
 const RECEIPT_SAMPLE_SIZE = 6;
 const TOP_LIMIT = 5;
 const TOP_BAKERIES_FETCH_LIMIT = 100;
-const CHECK_INDEX_BAKERY_LIMIT = 25;
-const CHECK_MEMBER_BAKERY_LIMIT = 12;
-const CHECK_MEMBER_FETCH_LIMIT = 300;
-const CHECK_TOP_CHEF_PAGES = 6;
+const CHECK_INDEX_BAKERY_LIMIT = 12;
+const CHECK_MEMBER_BAKERY_LIMIT = 5;
+const CHECK_MEMBER_FETCH_LIMIT = 150;
+const CHECK_TOP_CHEF_PAGES = 3;
 const COOKIE_UNIT = 1000;
 const CACHE_FILE = new URL('../.cache/latest-report.json', import.meta.url);
 const CHECK_INDEX_FILE = new URL('../.cache/latest-check-index.json', import.meta.url);
@@ -987,7 +987,10 @@ async function buildCheckIndex() {
   }
 
   const profileAddressSet = new Set([...memberMap.keys()]);
-  const profiles = await fetchProfilesByAddresses(baseUrl, [...profileAddressSet]);
+  const profiles = await fetchProfilesByAddresses(baseUrl, [...profileAddressSet]).catch((error) => {
+    console.warn(`Could not prefetch profiles for /ch index: ${error.message}`);
+    return [];
+  });
   const profileMap = new Map();
   const profileNameMap = new Map();
 
@@ -1018,6 +1021,49 @@ async function buildCheckIndex() {
   };
 }
 
+async function buildMinimalCheckIndex() {
+  const { baseUrl, agent, season, bakeries } = await withBaseUrlFallback(async (resolvedBaseUrl) => {
+    const [resolvedAgent, resolvedSeason, resolvedBakeries] = await Promise.all([
+      fetchAgent(resolvedBaseUrl).catch((error) => {
+        console.warn(`Could not fetch agent.json for minimal /ch index, using default cookie scale: ${error.message}`);
+        return { liveState: { gameplayCaps: { cookieScale: 10000 } } };
+      }),
+      fetchActiveSeason(resolvedBaseUrl),
+      fetchTopBakeries(resolvedBaseUrl, undefined, CHECK_INDEX_BAKERY_LIMIT),
+    ]);
+
+    return {
+      baseUrl: resolvedBaseUrl,
+      agent: resolvedAgent,
+      season: resolvedSeason,
+      bakeries: resolvedBakeries,
+    };
+  });
+
+  const ethUsd = await fetchEthUsd();
+  const bakeryValues = calculateCookieValues({
+    agent,
+    season,
+    bakeries: bakeries.slice(0, TOP_LIMIT),
+    ethUsd,
+  });
+
+  return {
+    generatedAtMs: Date.now(),
+    baseUrl,
+    bakeryContract: agent?.contracts?.bakery ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT),
+    rpcHttp: agent?.network?.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL),
+    season,
+    ethUsd,
+    bakeryMap: new Map(bakeries.map((bakery) => [bakery.id, bakery])),
+    bakeryValueMap: new Map(bakeryValues.map((item) => [item.name, item])),
+    memberMap: new Map(),
+    profileMap: new Map(),
+    profileNameMap: new Map(),
+    seasonStartTime: extractSeasonStartTime(season, bakeries, []),
+  };
+}
+
 function refreshCheckIndex() {
   if (checkIndexInFlight) return checkIndexInFlight;
 
@@ -1044,7 +1090,15 @@ async function getCheckIndex() {
     return checkIndexCache;
   }
 
-  return refreshCheckIndex();
+  try {
+    return await refreshCheckIndex();
+  } catch (error) {
+    console.warn(`Could not build full /ch index, falling back to a lighter index: ${error.message}`);
+    const minimalIndex = await buildMinimalCheckIndex();
+    checkIndexCache = minimalIndex;
+    saveCheckIndexCache(minimalIndex).catch(() => {});
+    return minimalIndex;
+  }
 }
 
 function refreshCheckIndexInBackground(force = false) {
@@ -1115,7 +1169,12 @@ async function resolveAddressByIdentity(index, identity) {
   const fromFastIndex = findAddressByIdentity(index, identity);
   if (fromFastIndex) return fromFastIndex;
   if (isAddress(identity)) return String(identity).trim().toLowerCase();
-  return findAddressByUsernameViaTopChefs(index, identity);
+  try {
+    return await findAddressByUsernameViaTopChefs(index, identity);
+  } catch (error) {
+    console.warn(`Could not resolve username for /ch (${identity}): ${error.message}`);
+    return null;
+  }
 }
 
 async function fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId }) {
@@ -1217,6 +1276,10 @@ export function renderCheckReport({
   const name = profile?.name ?? identity;
   const cookies = toNumber(member.txCount, 'member.txCount') / 10_000;
   const lines = ['<b>Season Check</b>', ''];
+  const gasCostText = gasSpentEth === null
+    ? '<b>N/A</b>'
+    : `<b>${formatEth(gasSpentEth, 5)} ETH</b>${gasSpentUsd === null ? '' : ` ($${formatNumber(gasSpentUsd, 0)})`}`;
+  const rewardText = `<b>${formatEth(rewardEth, 4)} ETH</b>${rewardUsd === null ? '' : ` ($${formatNumber(rewardUsd, 0)})`}`;
 
   lines.push(`<b>${escapeHtml(name)}</b>`);
   lines.push(`${escapeHtml(shortAddress(address))}`);
@@ -1224,10 +1287,12 @@ export function renderCheckReport({
   lines.push('');
   lines.push(`Cookies: <b>${compactCookies(cookies)}</b>`);
   lines.push(`Cook tx: <b>${txCount === null ? 'n/a' : formatNumber(txCount, 0)}</b>`);
-  lines.push(`Gas cost: <b>${formatEth(gasSpentEth, 5)} ETH</b>${gasSpentUsd === null ? '' : ` ($${formatNumber(gasSpentUsd, 0)})`}`);
-  lines.push(`Est. reward: <b>${formatEth(rewardEth, 4)} ETH</b>${rewardUsd === null ? '' : ` ($${formatNumber(rewardUsd, 0)})`}`);
+  lines.push(`Gas cost: ${gasCostText}`);
+  lines.push(`Est. reward: ${rewardText}`);
 
-  if (roiPercent === null) {
+  if (gasSpentEth === null) {
+    lines.push('Net ROI: <b>N/A</b>');
+  } else if (roiPercent === null) {
     lines.push(`Net ROI: <b>${netEth >= 0 ? '+' : ''}${formatEth(netEth, 4)} ETH</b>${netUsd === null ? '' : ` ($${netUsd >= 0 ? '+' : ''}$${formatNumber(Math.abs(netUsd), 0)})`}`);
   } else {
     lines.push(`Net ROI: <b>${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%</b>${netUsd === null ? '' : ` (${netUsd >= 0 ? '+' : '-'}$${formatNumber(Math.abs(netUsd), 0)})`}`);
@@ -1266,8 +1331,9 @@ function buildCheckCardData({
 }) {
   const name = profile?.name ?? identity;
   const cookies = toNumber(member.txCount, 'member.txCount') / 10_000;
-  const roiValue = roiPercent === null ? 'N/A' : `${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%`;
-  const netUsdValue = netUsd === null ? null : `${netUsd >= 0 ? '+' : '-'}${formatUsdCompact(netUsd, 0)}`;
+  const gasUnavailable = gasSpentEth === null;
+  const roiValue = gasUnavailable || roiPercent === null ? 'N/A' : `${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%`;
+  const netUsdValue = gasUnavailable || netUsd === null ? null : `${netUsd >= 0 ? '+' : '-'}${formatUsdCompact(netUsd, 0)}`;
   const gasUsdValue = gasSpentUsd === null ? null : formatUsdCompact(gasSpentUsd, 0);
   const rewardUsdValue = rewardUsd === null ? null : formatUsdCompact(rewardUsd, 0);
   const oneKValue = bakeryValue ? `${formatEth(bakeryValue.ethPerThousandCookies, 6)} ETH` : 'OUTSIDE TOP 5';
@@ -1292,7 +1358,7 @@ function buildCheckCardData({
       },
       {
         label: 'Gas cost',
-        value: `${formatEth(gasSpentEth, 5)} ETH`,
+        value: gasSpentEth === null ? 'N/A' : `${formatEth(gasSpentEth, 5)} ETH`,
         subvalue: gasUsdValue,
         accent: '#ff8e6e',
         valueColor: '#ffc5a5',
@@ -1379,9 +1445,22 @@ export async function buildCheckReport(identity) {
     : fetchProfilesByAddresses(index.baseUrl, [address]).catch(() => []);
 
   const [bakery, profileLookup, txStats] = await Promise.all([
-    bakeryPromise,
+    bakeryPromise.catch((error) => {
+      console.warn(`Could not fetch bakery for /ch (${member.bakeryId}): ${error.message}`);
+      return index.bakeryMap.get(member.bakeryId) ?? {
+        id: member.bakeryId,
+        name: 'Unknown bakery',
+      };
+    }),
     profilePromise,
-    txStatsPromise,
+    txStatsPromise.catch((error) => {
+      console.warn(`Could not fetch on-chain bake tx stats for /ch (${address}): ${error.message}`);
+      return {
+        transactionCount: null,
+        averageFeeEth: null,
+        source: 'unavailable',
+      };
+    }),
   ]);
 
   const bakeryValue = index.bakeryValueMap.get(bakery.name) ?? null;
@@ -1403,11 +1482,11 @@ export async function buildCheckReport(identity) {
 
   const txCount = txStats.transactionCount;
   const gasFeeEth = txStats.averageFeeEth ?? bakeTxFeeEth();
-  const gasSpentEth = txCount === null ? 0 : txCount * gasFeeEth;
-  const gasSpentUsd = index.ethUsd ? gasSpentEth * index.ethUsd : null;
-  const netEth = reward.rewardEth - gasSpentEth;
+  const gasSpentEth = txCount === null ? null : txCount * gasFeeEth;
+  const gasSpentUsd = gasSpentEth === null || index.ethUsd === null ? null : gasSpentEth * index.ethUsd;
+  const netEth = gasSpentEth === null ? reward.rewardEth : reward.rewardEth - gasSpentEth;
   const netUsd = reward.rewardUsd === null || gasSpentUsd === null ? null : reward.rewardUsd - gasSpentUsd;
-  const roiPercent = gasSpentEth > 0 ? (netEth / gasSpentEth) * 100 : null;
+  const roiPercent = gasSpentEth && gasSpentEth > 0 ? (netEth / gasSpentEth) * 100 : null;
 
   return {
     ok: true,
