@@ -521,23 +521,46 @@ async function rpcRequest(url, method, params, options = {}) {
     params,
   };
 
-  const { stdout } = await execFileAsync('curl', [
-    '-sS',
-    url,
-    '-H',
-    'content-type: application/json',
-    '--data',
-    JSON.stringify(payload),
-  ], {
-    timeout: timeoutMs,
-    maxBuffer,
-  });
+  try {
+    const response = await fetch(String(url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
 
-  const data = JSON.parse(stdout);
-  if (data.error) {
-    throw new Error(`RPC ${method} failed: ${data.error.message ?? JSON.stringify(data.error)}`);
+    if (!response.ok) {
+      throw new Error(`RPC ${method} failed: ${response.status} ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    if (data.error) {
+      throw new Error(`RPC ${method} failed: ${data.error.message ?? JSON.stringify(data.error)}`);
+    }
+    return data.result;
+  } catch (error) {
+    try {
+      const { stdout } = await execFileAsync('curl', [
+        '-sS',
+        url,
+        '-H',
+        'content-type: application/json',
+        '--data',
+        JSON.stringify(payload),
+      ], {
+        timeout: timeoutMs,
+        maxBuffer,
+      });
+
+      const data = JSON.parse(stdout);
+      if (data.error) {
+        throw new Error(`RPC ${method} failed: ${data.error.message ?? JSON.stringify(data.error)}`);
+      }
+      return data.result;
+    } catch (curlError) {
+      throw new Error(`${error.message}; RPC curl fallback failed: ${curlError.message}`);
+    }
   }
-  return data.result;
 }
 
 async function rpcBatchRequest(url, requests, options = {}) {
@@ -551,34 +574,68 @@ async function rpcBatchRequest(url, requests, options = {}) {
     params: request.params,
   }));
 
-  const { stdout } = await execFileAsync('curl', [
-    '-sS',
-    url,
-    '-H',
-    'content-type: application/json',
-    '--data',
-    JSON.stringify(payload),
-  ], {
-    timeout: timeoutMs,
-    maxBuffer,
-  });
+  try {
+    const response = await fetch(String(url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
 
-  const responses = JSON.parse(stdout);
-  if (!Array.isArray(responses)) {
-    throw new Error('RPC batch request returned a non-array response');
+    if (!response.ok) {
+      throw new Error(`RPC batch request failed: ${response.status} ${response.statusText}`);
+    }
+
+    const responses = await response.json();
+    if (!Array.isArray(responses)) {
+      throw new Error('RPC batch request returned a non-array response');
+    }
+
+    const byId = new Map(responses.map((rpcResponse) => [rpcResponse.id, rpcResponse]));
+    return payload.map((request) => {
+      const rpcResponse = byId.get(request.id);
+      if (!rpcResponse) {
+        throw new Error(`RPC batch ${request.method} response is missing`);
+      }
+      if (rpcResponse.error) {
+        throw new Error(`RPC ${request.method} failed: ${rpcResponse.error.message ?? JSON.stringify(rpcResponse.error)}`);
+      }
+      return rpcResponse.result ?? null;
+    });
+  } catch (error) {
+    try {
+      const { stdout } = await execFileAsync('curl', [
+        '-sS',
+        url,
+        '-H',
+        'content-type: application/json',
+        '--data',
+        JSON.stringify(payload),
+      ], {
+        timeout: timeoutMs,
+        maxBuffer,
+      });
+
+      const responses = JSON.parse(stdout);
+      if (!Array.isArray(responses)) {
+        throw new Error('RPC batch request returned a non-array response');
+      }
+
+      const byId = new Map(responses.map((rpcResponse) => [rpcResponse.id, rpcResponse]));
+      return payload.map((request) => {
+        const rpcResponse = byId.get(request.id);
+        if (!rpcResponse) {
+          throw new Error(`RPC batch ${request.method} response is missing`);
+        }
+        if (rpcResponse.error) {
+          throw new Error(`RPC ${request.method} failed: ${rpcResponse.error.message ?? JSON.stringify(rpcResponse.error)}`);
+        }
+        return rpcResponse.result ?? null;
+      });
+    } catch (curlError) {
+      throw new Error(`${error.message}; RPC curl fallback failed: ${curlError.message}`);
+    }
   }
-
-  const byId = new Map(responses.map((response) => [response.id, response]));
-  return payload.map((request) => {
-    const response = byId.get(request.id);
-    if (!response) {
-      throw new Error(`RPC batch ${request.method} response is missing`);
-    }
-    if (response.error) {
-      throw new Error(`RPC ${request.method} failed: ${response.error.message ?? JSON.stringify(response.error)}`);
-    }
-    return response.result ?? null;
-  });
 }
 
 function topicForAddress(address) {
