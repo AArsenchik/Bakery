@@ -1,0 +1,16 @@
+{
+  "name": "rugpull-bakery-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot that calculates the value of 1,000 cookies for top Rugpull Bakery teams.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/index.js",
+    "once": "node src/index.js --once",
+    "broadcast": "node src/index.js --broadcast",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
