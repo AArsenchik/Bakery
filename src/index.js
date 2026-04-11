@@ -41,6 +41,7 @@ let checkIndexInFlight = null;
 const checkReportCache = new Map();
 const checkStatsCache = new Map();
 const checkReportInFlight = new Map();
+const seasonStartBlockCache = new Map();
 const processedUpdateIds = new Map();
 let knownChats = new Set();
 const execFileAsync = promisify(execFile);
@@ -631,6 +632,18 @@ function parseHexBlock(value) {
   return BigInt(String(value));
 }
 
+function parseUnixTimestamp(value) {
+  if (value === null || value === undefined || value === '') return null;
+
+  try {
+    return BigInt(String(value));
+  } catch {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric) || numeric <= 0) return null;
+    return BigInt(Math.floor(numeric));
+  }
+}
+
 function parseSuggestedBlockRange(message) {
   const match = String(message).match(/\[(0x[a-f0-9]+),\s*(0x[a-f0-9]+)\]/i);
   if (!match) return null;
@@ -643,6 +656,61 @@ function parseSuggestedBlockRange(message) {
 
 async function fetchLatestBlockNumber(rpcHttp) {
   return parseHexBlock(await rpcRequest(rpcHttp, 'eth_blockNumber', [], { timeoutMs: 10_000 }));
+}
+
+async function fetchBlockHeader(rpcHttp, blockNumber) {
+  const block = await rpcRequest(rpcHttp, 'eth_getBlockByNumber', [blockToHex(blockNumber), false], {
+    timeoutMs: 10_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+
+  if (!block?.number || !block?.timestamp) {
+    throw new Error(`Could not fetch block header for ${blockNumber.toString()}`);
+  }
+
+  return {
+    number: parseHexBlock(block.number),
+    timestamp: parseHexBlock(block.timestamp),
+  };
+}
+
+async function findFirstBlockAtOrAfterTimestamp(rpcHttp, unixTimestamp) {
+  const targetTimestamp = parseUnixTimestamp(unixTimestamp);
+  if (targetTimestamp === null) return 0n;
+
+  const latestBlockNumber = await fetchLatestBlockNumber(rpcHttp);
+  const latestBlock = await fetchBlockHeader(rpcHttp, latestBlockNumber);
+  if (latestBlock.timestamp <= targetTimestamp) {
+    return latestBlock.number;
+  }
+
+  let low = 0n;
+  let high = latestBlock.number;
+
+  while (low < high) {
+    const mid = low + ((high - low) / 2n);
+    const block = await fetchBlockHeader(rpcHttp, mid);
+    if (block.timestamp < targetTimestamp) {
+      low = mid + 1n;
+    } else {
+      high = mid;
+    }
+  }
+
+  return low;
+}
+
+async function findSeasonStartBlock(rpcHttp, seasonId, seasonStartTime) {
+  const parsedStartTime = parseUnixTimestamp(seasonStartTime);
+  if (parsedStartTime === null) return 0n;
+
+  const cacheKey = `${rpcHttp}:${seasonId}:${parsedStartTime.toString()}`;
+  const cached = seasonStartBlockCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const blockNumber = await findFirstBlockAtOrAfterTimestamp(rpcHttp, parsedStartTime);
+  seasonStartBlockCache.set(cacheKey, blockNumber);
+  return blockNumber;
 }
 
 async function fetchLogsForRange(rpcHttp, filter, fromBlock, toBlock) {
@@ -887,6 +955,11 @@ export function renderWelcomeMessage() {
 }
 
 function extractSeasonStartTime(activeSeason, bakeries, members) {
+  const explicitSeasonStart = Number(activeSeason?.startTime);
+  if (Number.isFinite(explicitSeasonStart) && explicitSeasonStart > 1000) {
+    return explicitSeasonStart;
+  }
+
   const candidates = [activeSeason?.startTime, ...bakeries.map((item) => item.createdAt), ...members.map((item) => item.registeredAt)]
     .map((value) => Number(value))
     .filter((value) => Number.isFinite(value) && value > 1000);
@@ -1177,8 +1250,12 @@ async function resolveAddressByIdentity(index, identity) {
   }
 }
 
-async function fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId }) {
-  const latestBlock = await fetchLatestBlockNumber(rpcHttp);
+async function fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime }) {
+  const [fromBlock, latestBlock] = await Promise.all([
+    findSeasonStartBlock(rpcHttp, seasonId, seasonStartTime),
+    fetchLatestBlockNumber(rpcHttp),
+  ]);
+
   return fetchLogsForRange(rpcHttp, {
     address: bakeryContract,
     topics: [
@@ -1186,7 +1263,7 @@ async function fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId 
       topicForAddress(address),
       topicForUint(seasonId),
     ],
-  }, 0n, latestBlock);
+  }, fromBlock, latestBlock);
 }
 
 async function fetchAverageBakeFeeEth(rpcHttp, transactionHashes) {
@@ -1210,7 +1287,7 @@ async function fetchAverageBakeFeeEth(rpcHttp, transactionHashes) {
   return fees.reduce((sum, value) => sum + value, 0) / fees.length;
 }
 
-async function fetchBakeTxStats({ address, seasonId, rpcHttp, bakeryContract }) {
+async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, bakeryContract }) {
   const cacheKey = `${String(address).toLowerCase()}:${seasonId}`;
   const cached = checkStatsCache.get(cacheKey);
   if (cached && Date.now() - cached.generatedAtMs <= CHECK_STATS_TTL_MS) {
@@ -1218,7 +1295,7 @@ async function fetchBakeTxStats({ address, seasonId, rpcHttp, bakeryContract }) 
   }
 
   try {
-    const logs = await fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId });
+    const logs = await fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime });
     const transactionHashes = uniqueTransactionHashes(logs);
     const averageFeeEth = await fetchAverageBakeFeeEth(rpcHttp, transactionHashes);
     const value = {
@@ -1434,6 +1511,7 @@ export async function buildCheckReport(identity) {
   const txStatsPromise = fetchBakeTxStats({
     address,
     seasonId: index.season.id,
+    seasonStartTime: index.season?.startTime ?? index.seasonStartTime,
     rpcHttp: index.rpcHttp,
     bakeryContract: index.bakeryContract,
   });
