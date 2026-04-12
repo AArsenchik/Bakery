@@ -32,6 +32,7 @@ const DEFAULT_MAX_CONCURRENT_UPDATES = 6;
 const DEFAULT_MAX_SCHEDULED_UPDATES = 24;
 const PROCESSED_UPDATE_TTL_MS = 10 * 60_000;
 const HIDDEN_STATS_COMMAND = '/statsss777';
+const MOSCOW_TIME_ZONE = 'Europe/Moscow';
 
 const MEDALS = ['🥇', '🥈', '🥉', '🏅', '🏅'];
 const checkSessions = new Map();
@@ -108,6 +109,29 @@ function formatEth(value, maxFractionDigits = 6) {
     minimumFractionDigits: 0,
     maximumFractionDigits: maxFractionDigits,
   });
+}
+
+function formatMoscowDateTime(value, { includeSeconds = true } = {}) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return 'n/a';
+
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: MOSCOW_TIME_ZONE,
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: includeSeconds ? '2-digit' : undefined,
+    hour12: false,
+  }).formatToParts(date);
+
+  const byType = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  const time = includeSeconds
+    ? `${byType.hour}:${byType.minute}:${byType.second}`
+    : `${byType.hour}:${byType.minute}`;
+
+  return `${byType.day} ${byType.month} ${byType.year}, ${time} MSK`;
 }
 
 function escapeHtml(text) {
@@ -1010,7 +1034,7 @@ export function renderValueReport({ values, season, ethUsd, generatedAt }) {
 
   lines.push(`Prize pool: ${formatEth(weiToEth(season.prizePool ?? season.finalizedPrizePool), 4)} ETH`);
   if (ethUsd) lines.push(`ETH/USD: $${formatNumber(ethUsd, 2)}`);
-  lines.push(`Updated: ${generatedAt.toISOString()}`);
+  lines.push(`Updated: ${formatMoscowDateTime(generatedAt)}`);
 
   return lines.join('\n').trim();
 }
@@ -1032,7 +1056,7 @@ export function renderHiddenStatsMessage(stats, generatedAt = new Date()) {
     `Groups: <b>${formatNumber(stats.groupChats, 0)}</b>`,
     `Total chats: <b>${formatNumber(stats.totalChats, 0)}</b>`,
     '',
-    `Updated: ${generatedAt.toISOString()}`,
+    `Updated: ${formatMoscowDateTime(generatedAt)}`,
   ].join('\n');
 }
 
@@ -1458,7 +1482,7 @@ export function renderCheckReport({
   }
 
   lines.push('');
-  if (seasonStartTime) lines.push(`Season started: ${new Date(seasonStartTime * 1000).toISOString()}`);
+  if (seasonStartTime) lines.push(`Season started: ${formatMoscowDateTime(new Date(seasonStartTime * 1000))}`);
   lines.push(`Prize pool: ${formatEth(weiToEth(season.prizePool ?? season.finalizedPrizePool), 4)} ETH`);
   if (bakeryValue) {
     lines.push(`1,000 cookies in ${escapeHtml(bakery.name)}: ${formatEth(bakeryValue.ethPerThousandCookies, 6)} ETH`);

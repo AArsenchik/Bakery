@@ -52,6 +52,7 @@ test('renders a Telegram-safe report', () => {
   assert.match(report, /A&amp;B Bakery/);
   assert.match(report, /1,000 🍪 = \$2,000/);
   assert.match(report, /Prize pool: 10 ETH/);
+  assert.match(report, /Updated: 10 Apr 2026, 13:00:00 MSK/);
 });
 
 test('recognizes direct and group Telegram commands', () => {
@@ -181,6 +182,7 @@ test('renders the hidden stats message', () => {
   assert.match(message, /Users: <b>79<\/b>/);
   assert.match(message, /Groups: <b>2<\/b>/);
   assert.match(message, /Total chats: <b>81<\/b>/);
+  assert.match(message, /Updated: 12 Apr 2026, 13:00:00 MSK/);
 });
 
 test('renders a season check report', () => {
