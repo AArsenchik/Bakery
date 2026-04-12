@@ -7,8 +7,10 @@ import {
   conversationKeyForUpdate,
   createConversationScheduler,
   isCheckCommand,
+  isHiddenStatsCommand,
   isHelpCommand,
   isValueCommand,
+  renderHiddenStatsMessage,
   renderCheckReport,
   renderWelcomeMessage,
   renderValueReport,
@@ -65,6 +67,9 @@ test('recognizes direct and group Telegram commands', () => {
   assert.equal(isCheckCommand('/ch@RugBot'), true);
   assert.equal(isCheckCommand('/ch arsii'), true);
   assert.equal(isCheckCommand('/cookies'), false);
+  assert.equal(isHiddenStatsCommand('/statsss777'), true);
+  assert.equal(isHiddenStatsCommand('/statsss777@RugBot'), true);
+  assert.equal(isHiddenStatsCommand('/stats'), false);
 });
 
 test('builds a stable conversation key from chat and user', () => {
@@ -163,6 +168,19 @@ test('renders a welcome message with command descriptions', () => {
   assert.match(message, /1,000 cookies/);
   assert.match(message, /\/ch/);
   assert.match(message, /profit\/loss/i);
+  assert.doesNotMatch(message, /statsss777/i);
+});
+
+test('renders the hidden stats message', () => {
+  const message = renderHiddenStatsMessage({
+    privateUsers: 79,
+    groupChats: 2,
+    totalChats: 81,
+  }, new Date('2026-04-12T10:00:00.000Z'));
+
+  assert.match(message, /Users: <b>79<\/b>/);
+  assert.match(message, /Groups: <b>2<\/b>/);
+  assert.match(message, /Total chats: <b>81<\/b>/);
 });
 
 test('renders a season check report', () => {

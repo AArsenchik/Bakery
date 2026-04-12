@@ -31,6 +31,7 @@ const CHECK_SESSION_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_CONCURRENT_UPDATES = 6;
 const DEFAULT_MAX_SCHEDULED_UPDATES = 24;
 const PROCESSED_UPDATE_TTL_MS = 10 * 60_000;
+const HIDDEN_STATS_COMMAND = '/statsss777';
 
 const MEDALS = ['🥇', '🥈', '🥉', '🏅', '🏅'];
 const checkSessions = new Map();
@@ -82,6 +83,18 @@ function compactCookies(value) {
   if (value >= 1_000_000) return `${formatNumber(value / 1_000_000, 2)}M`;
   if (value >= 1_000) return `${formatNumber(value / 1_000, 1)}K`;
   return formatNumber(value, 0);
+}
+
+function countKnownChats() {
+  const allChats = [...knownChats];
+  const groupChats = allChats.filter((chatId) => String(chatId).startsWith('-')).length;
+  const privateUsers = allChats.length - groupChats;
+
+  return {
+    totalChats: allChats.length,
+    privateUsers,
+    groupChats,
+  };
 }
 
 function formatNumber(value, maxFractionDigits = 4) {
@@ -1011,6 +1024,18 @@ export function renderWelcomeMessage() {
   ].join('\n');
 }
 
+export function renderHiddenStatsMessage(stats, generatedAt = new Date()) {
+  return [
+    '<b>Bot Stats</b>',
+    '',
+    `Users: <b>${formatNumber(stats.privateUsers, 0)}</b>`,
+    `Groups: <b>${formatNumber(stats.groupChats, 0)}</b>`,
+    `Total chats: <b>${formatNumber(stats.totalChats, 0)}</b>`,
+    '',
+    `Updated: ${generatedAt.toISOString()}`,
+  ].join('\n');
+}
+
 function extractSeasonStartTime(activeSeason, bakeries, members) {
   const explicitSeasonStart = Number(activeSeason?.startTime);
   if (Number.isFinite(explicitSeasonStart) && explicitSeasonStart > 1000) {
@@ -1858,10 +1883,22 @@ export function isCheckCommand(text) {
   return command === '/ch';
 }
 
+export function isHiddenStatsCommand(text) {
+  if (!text) return false;
+  const { command } = parseCommandText(text);
+  return command === HIDDEN_STATS_COMMAND;
+}
+
 async function sendWelcomeMessage(chatId) {
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
   await sendMessage(chatId, renderWelcomeMessage());
+}
+
+async function sendHiddenStats(chatId) {
+  await loadKnownChats();
+  const stats = countKnownChats();
+  await sendMessage(chatId, renderHiddenStatsMessage(stats));
 }
 
 async function broadcastMessageToKnownChats(text) {
@@ -2016,6 +2053,11 @@ async function handleUpdate(update) {
 
   if (isValueCommand(text)) {
     await sendValueReport(chatId);
+    return;
+  }
+
+  if (isHiddenStatsCommand(text)) {
+    await sendHiddenStats(chatId);
     return;
   }
 
