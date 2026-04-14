@@ -1393,6 +1393,36 @@ async function fetchAverageBakeFeeEth(rpcHttp, transactionHashes) {
   return fees.reduce((sum, value) => sum + value, 0) / fees.length;
 }
 
+async function fetchTotalBakeFeeEth(rpcHttp, transactionHashes, {
+  batchSize = 250,
+  maxConcurrentBatches = 4,
+} = {}) {
+  if (!transactionHashes.length) return 0;
+
+  const batches = chunk(transactionHashes, batchSize);
+  const limiter = createLimiter(Math.max(1, maxConcurrentBatches));
+
+  const batchTotals = await Promise.all(
+    batches.map((batch) => limiter.run(async () => {
+      const receipts = await rpcBatchRequest(
+        rpcHttp,
+        batch.map((hash) => ({ method: 'eth_getTransactionReceipt', params: [hash] })),
+        {
+          timeoutMs: 20_000,
+          maxBuffer: 16 * 1024 * 1024,
+        },
+      );
+
+      return receipts
+        .map((receipt) => receiptFeeEth(receipt))
+        .filter((value) => Number.isFinite(value) && value > 0)
+        .reduce((sum, value) => sum + value, 0);
+    })),
+  );
+
+  return batchTotals.reduce((sum, value) => sum + value, 0);
+}
+
 async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, bakeryContract }) {
   const cacheKey = `${String(address).toLowerCase()}:${seasonId}`;
   const cached = checkStatsCache.get(cacheKey);
@@ -1403,11 +1433,38 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
   try {
     const logs = await fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime });
     const transactionHashes = uniqueTransactionHashes(logs);
-    const averageFeeEth = await fetchAverageBakeFeeEth(rpcHttp, transactionHashes);
+    const cachedValue = cached?.value;
+    let gasSpentEth = null;
+    let averageFeeEth = null;
+    let source = 'on-chain-bake-receipts-exact';
+    let receiptHashes = transactionHashes;
+
+    if (
+      cachedValue?.source === 'on-chain-bake-receipts-exact'
+      && Array.isArray(cachedValue.transactionHashes)
+      && Number.isFinite(cachedValue.gasSpentEth)
+    ) {
+      const knownHashes = new Set(cachedValue.transactionHashes);
+      const newHashes = transactionHashes.filter((hash) => !knownHashes.has(hash));
+
+      if (!newHashes.length) {
+        gasSpentEth = cachedValue.gasSpentEth;
+      } else {
+        const incrementalFeeEth = await fetchTotalBakeFeeEth(rpcHttp, newHashes);
+        gasSpentEth = cachedValue.gasSpentEth + incrementalFeeEth;
+      }
+    } else {
+      gasSpentEth = await fetchTotalBakeFeeEth(rpcHttp, transactionHashes);
+    }
+
+    averageFeeEth = transactionHashes.length > 0 ? gasSpentEth / transactionHashes.length : bakeTxFeeEth();
+
     const value = {
       transactionCount: transactionHashes.length,
+      gasSpentEth,
       averageFeeEth,
-      source: 'on-chain-bake-logs',
+      source,
+      transactionHashes: receiptHashes,
     };
 
     checkStatsCache.set(cacheKey, {
@@ -1417,7 +1474,27 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
     return value;
   } catch (error) {
     if (cached) return cached.value;
-    throw error;
+
+    try {
+      const logs = await fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime });
+      const transactionHashes = uniqueTransactionHashes(logs);
+      const averageFeeEth = await fetchAverageBakeFeeEth(rpcHttp, transactionHashes);
+      const value = {
+        transactionCount: transactionHashes.length,
+        gasSpentEth: transactionHashes.length * averageFeeEth,
+        averageFeeEth,
+        source: 'on-chain-bake-logs-approx',
+        transactionHashes,
+      };
+
+      checkStatsCache.set(cacheKey, {
+        value,
+        generatedAtMs: Date.now(),
+      });
+      return value;
+    } catch (fallbackError) {
+      throw new Error(`${error.message}; exact gas fallback failed: ${fallbackError.message}`);
+    }
   }
 }
 
@@ -1666,7 +1743,9 @@ export async function buildCheckReport(identity) {
 
   const txCount = txStats.transactionCount;
   const gasFeeEth = txStats.averageFeeEth ?? bakeTxFeeEth();
-  const gasSpentEth = txCount === null ? null : txCount * gasFeeEth;
+  const gasSpentEth = Number.isFinite(txStats.gasSpentEth)
+    ? txStats.gasSpentEth
+    : (txCount === null ? null : txCount * gasFeeEth);
   const gasSpentUsd = gasSpentEth === null || index.ethUsd === null ? null : gasSpentEth * index.ethUsd;
   const netEth = gasSpentEth === null ? reward.rewardEth : reward.rewardEth - gasSpentEth;
   const netUsd = reward.rewardUsd === null || gasSpentUsd === null ? null : reward.rewardUsd - gasSpentUsd;
