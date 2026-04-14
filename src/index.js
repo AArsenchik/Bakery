@@ -21,6 +21,7 @@ const COOKIE_UNIT = 1000;
 const CACHE_FILE = new URL('../.cache/latest-report.json', import.meta.url);
 const CHECK_INDEX_FILE = new URL('../.cache/latest-check-index.json', import.meta.url);
 const CHAT_REGISTRY_FILE = new URL('../.cache/known-chats.json', import.meta.url);
+const BASELINE_CHAT_REGISTRY_FILE = new URL('../data/all-time-known-chats-baseline.json', import.meta.url);
 const BOT_LOCK_FILE = new URL('../.cache/bot.lock.json', import.meta.url);
 const CACHE_TTL_MS = 30_000;
 const CACHE_STALE_MS = 10 * 60_000;
@@ -46,6 +47,7 @@ const checkReportInFlight = new Map();
 const seasonStartBlockCache = new Map();
 const processedUpdateIds = new Map();
 let knownChats = new Set();
+let baselineKnownChats = new Set();
 const execFileAsync = promisify(execFile);
 let botLockAcquired = false;
 
@@ -87,7 +89,7 @@ function compactCookies(value) {
 }
 
 function countKnownChats() {
-  const allChats = [...knownChats];
+  const allChats = [...new Set([...baselineKnownChats, ...knownChats])];
   const groupChats = allChats.filter((chatId) => String(chatId).startsWith('-')).length;
   const privateUsers = allChats.length - groupChats;
 
@@ -425,6 +427,11 @@ async function saveCheckIndexCache(index) {
 async function loadKnownChats() {
   const stored = await readCacheFile(CHAT_REGISTRY_FILE);
   knownChats = new Set(Array.isArray(stored) ? stored.map((value) => String(value)) : []);
+}
+
+async function loadBaselineKnownChats() {
+  const stored = await readCacheFile(BASELINE_CHAT_REGISTRY_FILE);
+  baselineKnownChats = new Set(Array.isArray(stored) ? stored.map((value) => String(value)) : []);
 }
 
 async function saveKnownChats() {
@@ -2199,6 +2206,7 @@ async function pollingLoop() {
   await loadReportCache();
   await loadCheckIndexCache();
   await loadKnownChats();
+  await loadBaselineKnownChats();
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
   setInterval(refreshReportCacheInBackground, CACHE_TTL_MS).unref();
