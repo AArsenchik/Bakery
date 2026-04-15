@@ -725,6 +725,47 @@ function receiptFeeEth(receipt) {
   return Number(gasUsed * effectiveGasPrice) / 1e18;
 }
 
+function validateReceiptFeeEntries(transactionHashes, receipts) {
+  const fees = [];
+  const missingHashes = [];
+
+  for (let index = 0; index < transactionHashes.length; index += 1) {
+    const hash = String(transactionHashes[index]).toLowerCase();
+    const receipt = receipts[index] ?? null;
+    const feeEth = receiptFeeEth(receipt);
+
+    if (!Number.isFinite(feeEth) || feeEth <= 0) {
+      missingHashes.push(hash);
+      continue;
+    }
+
+    fees.push({ hash, feeEth });
+  }
+
+  return { fees, missingHashes };
+}
+
+async function fetchReceiptFeesIndividually(rpcHttp, transactionHashes) {
+  const limiter = createLimiter(8);
+  const results = await Promise.all(
+    transactionHashes.map((hash) => limiter.run(async () => {
+      const receipt = await rpcRequest(rpcHttp, 'eth_getTransactionReceipt', [hash], {
+        timeoutMs: 12_000,
+        maxBuffer: 2 * 1024 * 1024,
+      });
+      const feeEth = receiptFeeEth(receipt);
+      return { hash, feeEth };
+    })),
+  );
+
+  return {
+    fees: results.filter((entry) => Number.isFinite(entry.feeEth) && entry.feeEth > 0),
+    missingHashes: results
+      .filter((entry) => !Number.isFinite(entry.feeEth) || entry.feeEth <= 0)
+      .map((entry) => String(entry.hash).toLowerCase()),
+  };
+}
+
 function blockToHex(blockNumber) {
   return `0x${blockNumber.toString(16)}`;
 }
@@ -1392,12 +1433,21 @@ async function fetchAverageBakeFeeEth(rpcHttp, transactionHashes) {
     },
   );
 
-  const fees = receipts
-    .map((receipt) => receiptFeeEth(receipt))
-    .filter((value) => Number.isFinite(value) && value > 0);
+  let { fees, missingHashes } = validateReceiptFeeEntries(sampleHashes, receipts);
+  if (missingHashes.length) {
+    const individual = await fetchReceiptFeesIndividually(rpcHttp, missingHashes);
+    fees = [
+      ...fees,
+      ...individual.fees,
+    ];
+    missingHashes = individual.missingHashes;
+  }
 
   if (!fees.length) return bakeTxFeeEth();
-  return fees.reduce((sum, value) => sum + value, 0) / fees.length;
+  if (missingHashes.length) {
+    throw new Error(`Could not fetch ${missingHashes.length} sample receipt(s) for gas estimation`);
+  }
+  return fees.reduce((sum, entry) => sum + entry.feeEth, 0) / fees.length;
 }
 
 async function fetchTotalBakeFeeEth(rpcHttp, transactionHashes, {
@@ -1409,7 +1459,7 @@ async function fetchTotalBakeFeeEth(rpcHttp, transactionHashes, {
   const batches = chunk(transactionHashes, batchSize);
   const limiter = createLimiter(Math.max(1, maxConcurrentBatches));
 
-  const batchTotals = await Promise.all(
+  const batchResults = await Promise.all(
     batches.map((batch) => limiter.run(async () => {
       const receipts = await rpcBatchRequest(
         rpcHttp,
@@ -1420,14 +1470,29 @@ async function fetchTotalBakeFeeEth(rpcHttp, transactionHashes, {
         },
       );
 
-      return receipts
-        .map((receipt) => receiptFeeEth(receipt))
-        .filter((value) => Number.isFinite(value) && value > 0)
-        .reduce((sum, value) => sum + value, 0);
+      return validateReceiptFeeEntries(batch, receipts);
     })),
   );
 
-  return batchTotals.reduce((sum, value) => sum + value, 0);
+  let total = 0;
+  let missingHashes = [];
+
+  for (const result of batchResults) {
+    total += result.fees.reduce((sum, entry) => sum + entry.feeEth, 0);
+    missingHashes.push(...result.missingHashes);
+  }
+
+  if (missingHashes.length) {
+    const individual = await fetchReceiptFeesIndividually(rpcHttp, [...new Set(missingHashes)]);
+    total += individual.fees.reduce((sum, entry) => sum + entry.feeEth, 0);
+    missingHashes = individual.missingHashes;
+  }
+
+  if (missingHashes.length) {
+    throw new Error(`Could not fetch ${missingHashes.length} receipt(s) for exact gas calculation`);
+  }
+
+  return total;
 }
 
 export function deriveApproxBakeTxStats({
@@ -1508,6 +1573,15 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
       }
     } else {
       gasSpentEth = await fetchTotalBakeFeeEth(rpcHttp, transactionHashes);
+    }
+
+    if (
+      cachedValue?.source === 'on-chain-bake-receipts-exact'
+      && Number.isFinite(cachedValue.gasSpentEth)
+      && transactionHashes.length >= (cachedValue.transactionHashes?.length ?? 0)
+      && gasSpentEth + 1e-12 < cachedValue.gasSpentEth
+    ) {
+      throw new Error('Exact gas calculation regressed below cached exact value');
     }
 
     averageFeeEth = transactionHashes.length > 0 ? gasSpentEth / transactionHashes.length : bakeTxFeeEth();
