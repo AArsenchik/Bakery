@@ -57,19 +57,16 @@ const FONT = {
 
 const WIDTH = 1080;
 const HEIGHT = 1350;
-const TILE_GAP = 30;
-const PANEL_X = 86;
-const HEADER_Y = 104;
-const HEADER_HEIGHT = 264;
-const TILE_TOP = 406;
-const TILE_HEIGHT = 206;
-const TILE_RADIUS = 34;
+const TILE_GAP = 28;
+const PANEL_X = 72;
+const HEADER_Y = 72;
+const HEADER_HEIGHT = 286;
+const TILE_TOP = 398;
+const TILE_HEIGHT = 208;
+const TILE_RADIUS = 30;
 const AVATAR_SIZE = 112;
-const AVATAR_X = PANEL_X + 34;
-const AVATAR_Y = HEADER_Y + 74;
-const FRAME_X = 44;
-const FRAME_Y = 36;
-const FRAME_RADIUS = 58;
+const AVATAR_X = PANEL_X + 24;
+const AVATAR_Y = 112;
 const avatarImageCache = new Map();
 const CRC_TABLE = new Uint32Array(256).map((_, index) => {
   let crc = index;
@@ -101,11 +98,6 @@ function mixColor(a, b, factor) {
     Math.round(a[2] + (b[2] - a[2]) * factor),
     Math.round(a[3] + (b[3] - a[3]) * factor),
   ];
-}
-
-function scaleAlpha(color, factor) {
-  const [r, g, b, a] = normalizeColor(color);
-  return [r, g, b, Math.round(a * factor)];
 }
 
 function crc32(buffer) {
@@ -204,43 +196,6 @@ class Canvas {
         if ((cx * cx) + (cy * cy) <= clampedRadius * clampedRadius) {
           this.blendPixel(px, py, color, 1);
         }
-      }
-    }
-  }
-
-  fillRoundedRectGradient(x, y, width, height, radius, startColor, endColor, options = {}) {
-    const xStart = Math.max(0, Math.floor(x));
-    const yStart = Math.max(0, Math.floor(y));
-    const xEnd = Math.min(this.width, Math.ceil(x + width));
-    const yEnd = Math.min(this.height, Math.ceil(y + height));
-    const clampedRadius = Math.max(0, Math.min(radius, Math.floor(Math.min(width, height) / 2)));
-    const start = normalizeColor(startColor);
-    const end = normalizeColor(endColor);
-    const direction = options.direction ?? 'vertical';
-    const denom = Math.max(1, (direction === 'horizontal' ? width : height) - 1);
-
-    for (let py = yStart; py < yEnd; py += 1) {
-      for (let px = xStart; px < xEnd; px += 1) {
-        const dx = Math.min(px - x, x + width - 1 - px);
-        const dy = Math.min(py - y, y + height - 1 - py);
-        let inside = false;
-
-        if (dx >= clampedRadius || dy >= clampedRadius) {
-          inside = true;
-        } else {
-          const cx = clampedRadius - dx - 1;
-          const cy = clampedRadius - dy - 1;
-          inside = (cx * cx) + (cy * cy) <= clampedRadius * clampedRadius;
-        }
-
-        if (!inside) continue;
-
-        const factor = clamp(
-          direction === 'horizontal' ? (px - x) / denom : (py - y) / denom,
-          0,
-          1,
-        );
-        this.blendPixel(px, py, mixColor(start, end, factor), 1);
       }
     }
   }
@@ -445,10 +400,9 @@ function drawAvatar(canvas, avatar, x, y, size) {
   const cropX = (srcWidth - cropWidth) / 2;
   const cropY = (srcHeight - cropHeight) / 2;
 
-  canvas.fillCircle(cx, cy, radius + 24, '#7dbdff22', 1);
-  canvas.fillCircle(cx, cy, radius + 10, '#92dbff55', 0.9);
-  canvas.fillCircle(cx, cy, radius + 2, '#f1fbff66', 0.9);
-  canvas.fillCircle(cx, cy, radius - 1, '#0a1931', 1);
+  canvas.fillCircle(cx, cy, radius + 8, '#3bf0de22', 0.9);
+  canvas.fillCircle(cx, cy, radius + 2, '#6df3e4', 0.8);
+  canvas.fillCircle(cx, cy, radius - 1, '#0b1624', 1);
 
   for (let dy = 0; dy < size; dy += 1) {
     for (let dx = 0; dx < size; dx += 1) {
@@ -474,96 +428,6 @@ function drawAvatar(canvas, avatar, x, y, size) {
   }
 }
 
-function drawSoftShadow(canvas, x, y, width, height, radius, color, spread = 22, steps = 7) {
-  for (let index = steps; index >= 1; index -= 1) {
-    const growth = Math.round((spread / steps) * index);
-    const alpha = 0.11 * (index / steps);
-    canvas.fillRoundedRect(
-      x - growth,
-      y - growth,
-      width + (growth * 2),
-      height + (growth * 2),
-      radius + growth,
-      scaleAlpha(color, alpha),
-    );
-  }
-}
-
-function drawGlassPanel(canvas, x, y, width, height, radius, options = {}) {
-  const borderColor = options.borderColor ?? '#9cc3ff26';
-  const topColor = options.topColor ?? '#244f99e6';
-  const bottomColor = options.bottomColor ?? '#24345fd8';
-  const glossColor = options.glossColor ?? '#ffffff14';
-  const shadowColor = options.shadowColor ?? '#030c1fcc';
-  const shadowSpread = options.shadowSpread ?? 18;
-  const shadowSteps = options.shadowSteps ?? 6;
-  const inset = options.inset ?? 3;
-
-  drawSoftShadow(canvas, x, y, width, height, radius, shadowColor, shadowSpread, shadowSteps);
-  canvas.fillRoundedRect(x, y, width, height, radius, borderColor);
-  canvas.fillRoundedRectGradient(
-    x + inset,
-    y + inset,
-    width - (inset * 2),
-    height - (inset * 2),
-    Math.max(0, radius - inset),
-    topColor,
-    bottomColor,
-  );
-
-  const glossHeight = Math.round(height * 0.48);
-  canvas.fillRoundedRectGradient(
-    x + inset,
-    y + inset,
-    width - (inset * 2),
-    glossHeight,
-    Math.max(0, radius - inset),
-    glossColor,
-    [255, 255, 255, 0],
-  );
-  canvas.fillRoundedRect(x + 18, y + 18, width - 36, 2, Math.max(0, radius - 18), '#ffffff26');
-}
-
-function badgeGlyph(label) {
-  const normalized = normalizeText(label);
-  if (normalized.startsWith('1K')) return '1K';
-  if (normalized.includes('COOKIE')) return 'CK';
-  if (normalized.includes('COOK')) return 'TX';
-  if (normalized.includes('GAS')) return 'G';
-  if (normalized.includes('REWARD')) return 'R';
-  if (normalized.includes('ROI')) return '%';
-  return normalized.slice(0, 2) || '?';
-}
-
-function drawIconBadge(canvas, x, y, size, accent, glyph) {
-  const accentColor = normalizeColor(accent);
-  const badgeTop = mixColor(accentColor, normalizeColor('#6d8dff'), 0.45);
-  const badgeBottom = mixColor(accentColor, normalizeColor('#1a2450'), 0.72);
-  const glowColor = [accentColor[0], accentColor[1], accentColor[2], 88];
-
-  canvas.fillCircle(x + (size / 2), y + (size / 2), size * 0.78, glowColor, 0.85);
-  drawGlassPanel(canvas, x, y, size, size, 22, {
-    topColor: badgeTop,
-    bottomColor: badgeBottom,
-    borderColor: scaleAlpha('#ffffff', 0.16),
-    glossColor: [255, 255, 255, 32],
-    shadowColor: scaleAlpha(accent, 0.22),
-    shadowSpread: 14,
-    shadowSteps: 5,
-    inset: 2,
-  });
-
-  const scale = glyph.length >= 2 ? 4 : 5;
-  canvas.drawText(
-    x + (size / 2),
-    y + Math.round((size - (7 * scale)) / 2) - 2,
-    glyph,
-    scale,
-    '#f5f7ff',
-    { align: 'center', letterSpacing: Math.max(1, scale - 1) },
-  );
-}
-
 function drawTile(canvas, tile, index) {
   const tileWidth = (WIDTH - (PANEL_X * 2) - TILE_GAP) / 2;
   const column = index % 2;
@@ -571,61 +435,31 @@ function drawTile(canvas, tile, index) {
   const x = PANEL_X + (column * (tileWidth + TILE_GAP));
   const y = TILE_TOP + (row * (TILE_HEIGHT + TILE_GAP));
   const accent = tile.accent ?? '#49d6d0';
-  const accentColor = normalizeColor(accent);
-  const topColor = mixColor(accentColor, normalizeColor('#225d9c'), 0.72);
-  const bottomColor = mixColor(accentColor, normalizeColor('#2f214f'), 0.82);
 
-  drawGlassPanel(canvas, x, y, tileWidth, TILE_HEIGHT, TILE_RADIUS, {
-    topColor: scaleAlpha(topColor, 0.9),
-    bottomColor: scaleAlpha(bottomColor, 0.96),
-    borderColor: '#dfeeff2e',
-    glossColor: [255, 255, 255, 28],
-    shadowColor: scaleAlpha(accent, 0.18),
-    shadowSpread: 18,
-    shadowSteps: 6,
-    inset: 2,
-  });
+  canvas.fillRoundedRect(x + 10, y + 12, tileWidth, TILE_HEIGHT, TILE_RADIUS, [1, 12, 20, 78]);
+  canvas.fillRoundedRect(x, y, tileWidth, TILE_HEIGHT, TILE_RADIUS, '#0e2030');
+  canvas.fillRoundedRect(x, y, tileWidth, 3, TILE_RADIUS, accent);
+  canvas.fillRect(x + 26, y + 26, 48, 4, accent);
 
-  drawIconBadge(canvas, x + 26, y + 34, 72, accent, badgeGlyph(tile.label));
+  canvas.drawText(x + 26, y + 42, tile.label, 4, '#b8d8d7');
 
-  canvas.drawText(x + 118, y + 48, tile.label, 3, scaleAlpha(accent, 0.95), {
-    letterSpacing: 2,
-  });
-
-  const valueScale = fittedScale(canvas, tile.value, tileWidth - 52, 7, 4);
-  canvas.drawText(x + 28, y + 98, tile.value, valueScale, tile.valueColor ?? '#f6f7e6');
+  const valueScale = fittedScale(canvas, tile.value, tileWidth - 52, 8, 5);
+  canvas.drawText(x + 26, y + 86, tile.value, valueScale, tile.valueColor ?? '#ffe089');
 
   if (tile.subvalue) {
-    const subScale = fittedScale(canvas, tile.subvalue, tileWidth - 56, 4, 3);
-    canvas.drawText(x + 28, y + 162, tile.subvalue, subScale, tile.subvalueColor ?? '#d7e9f6');
+    const subScale = fittedScale(canvas, tile.subvalue, tileWidth - 52, 4, 3);
+    canvas.drawText(x + 26, y + 166, tile.subvalue, subScale, tile.subvalueColor ?? '#8de5da');
   }
 }
 
 function drawBackground(canvas) {
-  canvas.verticalGradient('#07264b', '#151a38');
-  canvas.fillCircle(236, 172, 250, '#6ae4ff33', 0.95);
-  canvas.fillCircle(760, 168, 320, '#4f7fff2a', 0.82);
-  canvas.fillCircle(870, 1130, 340, '#f4a2ff20', 0.72);
-  canvas.fillCircle(250, 1190, 260, '#60b7ff1a', 0.65);
-  drawGlassPanel(canvas, FRAME_X, FRAME_Y, WIDTH - (FRAME_X * 2), HEIGHT - (FRAME_Y * 2), FRAME_RADIUS, {
-    topColor: '#2b4c86c4',
-    bottomColor: '#5e5ea06c',
-    borderColor: '#d7ecff2d',
-    glossColor: [255, 255, 255, 24],
-    shadowColor: '#020816d4',
-    shadowSpread: 26,
-    shadowSteps: 7,
-    inset: 3,
-  });
-  canvas.fillRoundedRectGradient(
-    FRAME_X + 24,
-    FRAME_Y + 24,
-    WIDTH - (FRAME_X * 2) - 48,
-    HEIGHT - (FRAME_Y * 2) - 48,
-    FRAME_RADIUS - 18,
-    '#13284fb8',
-    '#16172db8',
-  );
+  canvas.verticalGradient('#06131d', '#123246');
+  canvas.fillCircle(176, 178, 190, '#1ed7c644', 0.9);
+  canvas.fillCircle(934, 230, 240, '#1d9bf066', 0.65);
+  canvas.fillCircle(844, 1120, 280, '#ffd1661c', 0.65);
+  canvas.fillCircle(246, 1180, 220, '#0cf2b933', 0.45);
+  canvas.fillRoundedRect(40, 40, WIDTH - 80, HEIGHT - 80, 44, '#193345cc');
+  canvas.fillRoundedRect(56, 56, WIDTH - 112, HEIGHT - 112, 40, '#091722');
 }
 
 export async function renderStatCardPng(card) {
@@ -633,49 +467,21 @@ export async function renderStatCardPng(card) {
   const avatar = card.avatarUrl ? await fetchAvatarImage(card.avatarUrl) : null;
   drawBackground(canvas);
 
-  drawGlassPanel(canvas, PANEL_X, HEADER_Y, WIDTH - (PANEL_X * 2), HEADER_HEIGHT, 40, {
-    topColor: '#24529ee6',
-    bottomColor: '#28448de0',
-    borderColor: '#d6ebff30',
-    glossColor: [255, 255, 255, 34],
-    shadowColor: '#08142ab2',
-    shadowSpread: 20,
-    shadowSteps: 6,
-    inset: 2,
-  });
+  canvas.fillRoundedRect(PANEL_X, HEADER_Y, WIDTH - (PANEL_X * 2), HEADER_HEIGHT, 36, '#173246');
+  canvas.fillRoundedRect(PANEL_X, HEADER_Y, WIDTH - (PANEL_X * 2), 4, 36, '#51e5d9');
+  const headerTextX = avatar ? AVATAR_X + AVATAR_SIZE + 32 : 108;
 
   if (avatar) {
     drawAvatar(canvas, avatar, AVATAR_X, AVATAR_Y, AVATAR_SIZE);
-  } else {
-    drawIconBadge(canvas, AVATAR_X + 18, AVATAR_Y + 12, 88, '#8a92ff', 'S');
   }
 
-  const headerTextX = avatar ? AVATAR_X + AVATAR_SIZE + 34 : AVATAR_X + 132;
-  canvas.drawText(headerTextX, HEADER_Y + 40, card.title ?? 'SEASON CHECK', 4, '#b8d8ff', {
-    letterSpacing: 2,
-  });
-  const headerTextWidth = WIDTH - headerTextX - 110;
+  canvas.drawText(headerTextX, 96, card.title ?? 'SEASON CHECK', 4, '#8adfd8');
+  const headerTextWidth = WIDTH - headerTextX - 92;
   const nameScale = fittedScale(canvas, card.name, headerTextWidth, 8, 5);
-  canvas.drawText(headerTextX, HEADER_Y + 88, card.name, nameScale, '#f5f7ff');
-  canvas.drawText(headerTextX, HEADER_Y + 160, card.address, 3, '#a8c6ef');
-
-  const clanScale = fittedScale(canvas, card.clan, headerTextWidth - 48, 3, 2);
-  const clanTextWidth = canvas.textWidth(card.clan, clanScale, Math.max(1, clanScale - 1));
-  const clanPillWidth = Math.min(headerTextWidth, clanTextWidth + 34);
-  const clanPillY = HEADER_Y + 196;
-  drawGlassPanel(canvas, headerTextX, clanPillY, clanPillWidth, 42, 21, {
-    topColor: '#5867f2d6',
-    bottomColor: '#4b5dddcc',
-    borderColor: '#ffffff20',
-    glossColor: [255, 255, 255, 22],
-    shadowColor: '#203b9a66',
-    shadowSpread: 12,
-    shadowSteps: 5,
-    inset: 2,
-  });
-  canvas.drawText(headerTextX + 18, clanPillY + 11, card.clan, clanScale, '#e7ecff', {
-    letterSpacing: Math.max(1, clanScale - 1),
-  });
+  canvas.drawText(headerTextX, 144, card.name, nameScale, '#f6f3df');
+  canvas.drawText(headerTextX, 224, card.address, 3, '#9bc8d6');
+  const clanScale = fittedScale(canvas, card.clan, headerTextWidth, 4, 3);
+  canvas.drawWrappedText(headerTextX, 258, headerTextWidth, card.clan, clanScale, '#ffd88c', { lineHeight: 36 });
 
   card.tiles.forEach((tile, index) => {
     drawTile(canvas, tile, index);
