@@ -231,8 +231,8 @@ test('renders a season check report', () => {
   assert.match(report, /Net ROI: <b>\+34.6%<\/b> \(\+\$65\)|Net ROI: <b>\+34.6%<\/b>\s*\(\+\$65\)/);
 });
 
-test('renders a png stat card buffer', () => {
-  const buffer = renderStatCardPng({
+test('renders a png stat card buffer', async () => {
+  const buffer = await renderStatCardPng({
     title: 'Season Check',
     name: 'ARSii',
     address: '0x984C...D83C',

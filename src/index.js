@@ -1668,6 +1668,7 @@ function buildCheckCardData({
     name,
     address: shortAddress(address),
     clan: `Clan: ${bakery.name}${bakeryValue ? ' (top 5)' : ''}`,
+    avatarUrl: profile?.profilePictureUrl ?? null,
     tiles: [
       {
         label: 'Cookies',
@@ -2015,7 +2016,7 @@ async function sendCheckResult(chatId, result, extra = {}) {
   }
 
   try {
-    const photoBuffer = renderStatCardPng(result.cardData);
+    const photoBuffer = await renderStatCardPng(result.cardData);
     await sendChatActionSafely(chatId, 'upload_photo');
     await sendPhoto(chatId, photoBuffer, 'season-check.png', extra);
   } catch (error) {

@@ -1,4 +1,6 @@
 import { deflateSync } from 'node:zlib';
+import jpeg from 'jpeg-js';
+import { PNG } from 'pngjs';
 
 const FONT = {
   ' ': ['00000', '00000', '00000', '00000', '00000', '00000', '00000'],
@@ -62,6 +64,10 @@ const HEADER_HEIGHT = 286;
 const TILE_TOP = 398;
 const TILE_HEIGHT = 208;
 const TILE_RADIUS = 30;
+const AVATAR_SIZE = 112;
+const AVATAR_X = PANEL_X + 24;
+const AVATAR_Y = 112;
+const avatarImageCache = new Map();
 const CRC_TABLE = new Uint32Array(256).map((_, index) => {
   let crc = index;
   for (let bit = 0; bit < 8; bit += 1) {
@@ -318,6 +324,110 @@ function fittedScale(canvas, text, maxWidth, preferredScale, minimumScale) {
   return minimumScale;
 }
 
+function isPngBuffer(buffer) {
+  return buffer.length >= 8
+    && buffer[0] === 0x89
+    && buffer[1] === 0x50
+    && buffer[2] === 0x4e
+    && buffer[3] === 0x47;
+}
+
+function isJpegBuffer(buffer) {
+  return buffer.length >= 3
+    && buffer[0] === 0xff
+    && buffer[1] === 0xd8
+    && buffer[2] === 0xff;
+}
+
+function decodeAvatarBuffer(buffer, contentType = '') {
+  const lowerType = String(contentType).toLowerCase();
+  if (lowerType.includes('png') || isPngBuffer(buffer)) {
+    const image = PNG.sync.read(buffer);
+    return {
+      width: image.width,
+      height: image.height,
+      data: image.data,
+    };
+  }
+
+  if (lowerType.includes('jpeg') || lowerType.includes('jpg') || isJpegBuffer(buffer)) {
+    const image = jpeg.decode(buffer, { useTArray: true });
+    return {
+      width: image.width,
+      height: image.height,
+      data: image.data,
+    };
+  }
+
+  throw new Error('Unsupported avatar image format');
+}
+
+async function fetchAvatarImage(avatarUrl) {
+  const normalized = String(avatarUrl ?? '').trim();
+  if (!normalized) return null;
+  if (avatarImageCache.has(normalized)) return avatarImageCache.get(normalized);
+
+  const promise = (async () => {
+    const response = await fetch(normalized, {
+      headers: { accept: 'image/png,image/jpeg,image/*;q=0.9,*/*;q=0.8' },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`GET ${normalized} failed: ${response.status} ${response.statusText}`);
+    }
+
+    const contentType = response.headers.get('content-type') ?? '';
+    const buffer = Buffer.from(await response.arrayBuffer());
+    return decodeAvatarBuffer(buffer, contentType);
+  })().catch(() => null);
+
+  avatarImageCache.set(normalized, promise);
+  return promise;
+}
+
+function drawAvatar(canvas, avatar, x, y, size) {
+  if (!avatar?.data || !avatar.width || !avatar.height) return;
+
+  const radius = size / 2;
+  const cx = x + radius;
+  const cy = y + radius;
+  const innerRadius = radius - 4;
+  const srcWidth = avatar.width;
+  const srcHeight = avatar.height;
+  const cropWidth = Math.min(srcWidth, srcHeight);
+  const cropHeight = cropWidth;
+  const cropX = (srcWidth - cropWidth) / 2;
+  const cropY = (srcHeight - cropHeight) / 2;
+
+  canvas.fillCircle(cx, cy, radius + 8, '#3bf0de22', 0.9);
+  canvas.fillCircle(cx, cy, radius + 2, '#6df3e4', 0.8);
+  canvas.fillCircle(cx, cy, radius - 1, '#0b1624', 1);
+
+  for (let dy = 0; dy < size; dy += 1) {
+    for (let dx = 0; dx < size; dx += 1) {
+      const px = x + dx;
+      const py = y + dy;
+      const deltaX = (px + 0.5) - cx;
+      const deltaY = (py + 0.5) - cy;
+      if ((deltaX * deltaX) + (deltaY * deltaY) > innerRadius * innerRadius) continue;
+
+      const srcX = Math.min(srcWidth - 1, Math.max(0, Math.floor(cropX + ((dx + 0.5) / size) * cropWidth)));
+      const srcY = Math.min(srcHeight - 1, Math.max(0, Math.floor(cropY + ((dy + 0.5) / size) * cropHeight)));
+      const offset = (srcY * srcWidth + srcX) * 4;
+      const alpha = avatar.data[offset + 3] / 255;
+      if (alpha <= 0) continue;
+
+      canvas.blendPixel(px, py, [
+        avatar.data[offset],
+        avatar.data[offset + 1],
+        avatar.data[offset + 2],
+        avatar.data[offset + 3],
+      ], alpha);
+    }
+  }
+}
+
 function drawTile(canvas, tile, index) {
   const tileWidth = (WIDTH - (PANEL_X * 2) - TILE_GAP) / 2;
   const column = index % 2;
@@ -352,20 +462,26 @@ function drawBackground(canvas) {
   canvas.fillRoundedRect(56, 56, WIDTH - 112, HEIGHT - 112, 40, '#091722');
 }
 
-export function renderStatCardPng(card) {
+export async function renderStatCardPng(card) {
   const canvas = new Canvas(WIDTH, HEIGHT);
+  const avatar = card.avatarUrl ? await fetchAvatarImage(card.avatarUrl) : null;
   drawBackground(canvas);
 
   canvas.fillRoundedRect(PANEL_X, HEADER_Y, WIDTH - (PANEL_X * 2), HEADER_HEIGHT, 36, '#173246');
   canvas.fillRoundedRect(PANEL_X, HEADER_Y, WIDTH - (PANEL_X * 2), 4, 36, '#51e5d9');
-  const headerTextX = 108;
+  const headerTextX = avatar ? AVATAR_X + AVATAR_SIZE + 32 : 108;
+
+  if (avatar) {
+    drawAvatar(canvas, avatar, AVATAR_X, AVATAR_Y, AVATAR_SIZE);
+  }
 
   canvas.drawText(headerTextX, 96, card.title ?? 'SEASON CHECK', 4, '#8adfd8');
-  const nameScale = fittedScale(canvas, card.name, WIDTH - 220, 8, 5);
+  const headerTextWidth = WIDTH - headerTextX - 92;
+  const nameScale = fittedScale(canvas, card.name, headerTextWidth, 8, 5);
   canvas.drawText(headerTextX, 144, card.name, nameScale, '#f6f3df');
   canvas.drawText(headerTextX, 224, card.address, 3, '#9bc8d6');
-  const clanScale = fittedScale(canvas, card.clan, WIDTH - 220, 4, 3);
-  canvas.drawWrappedText(headerTextX, 258, WIDTH - 220, card.clan, clanScale, '#ffd88c', { lineHeight: 36 });
+  const clanScale = fittedScale(canvas, card.clan, headerTextWidth, 4, 3);
+  canvas.drawWrappedText(headerTextX, 258, headerTextWidth, card.clan, clanScale, '#ffd88c', { lineHeight: 36 });
 
   card.tiles.forEach((tile, index) => {
     drawTile(canvas, tile, index);
