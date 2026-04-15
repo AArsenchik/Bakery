@@ -27,7 +27,7 @@ const CACHE_TTL_MS = 30_000;
 const CACHE_STALE_MS = 10 * 60_000;
 const CHECK_INDEX_TTL_MS = 30_000;
 const CHECK_REPORT_TTL_MS = 30_000;
-const CHECK_STATS_TTL_MS = 15 * 60_000;
+const CHECK_STATS_TTL_MS = 2 * 60_000;
 const CHECK_SESSION_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_CONCURRENT_UPDATES = 6;
 const DEFAULT_MAX_SCHEDULED_UPDATES = 24;
@@ -1430,6 +1430,51 @@ async function fetchTotalBakeFeeEth(rpcHttp, transactionHashes, {
   return batchTotals.reduce((sum, value) => sum + value, 0);
 }
 
+export function deriveApproxBakeTxStats({
+  transactionHashes,
+  cachedValue = null,
+  averageFeeEth = null,
+  fallbackFeeEth = DEFAULT_BAKE_TX_FEE_ETH,
+}) {
+  const uniqueHashes = Array.isArray(transactionHashes)
+    ? [...new Set(transactionHashes)]
+    : [];
+  const feePerTx = Number.isFinite(averageFeeEth) && averageFeeEth > 0
+    ? averageFeeEth
+    : (Number.isFinite(cachedValue?.averageFeeEth) && cachedValue.averageFeeEth > 0
+        ? cachedValue.averageFeeEth
+        : fallbackFeeEth);
+
+  let gasSpentEth = uniqueHashes.length * feePerTx;
+  let source = 'on-chain-bake-logs-approx';
+
+  if (
+    Array.isArray(cachedValue?.transactionHashes)
+    && Number.isFinite(cachedValue?.gasSpentEth)
+  ) {
+    const knownHashes = new Set(cachedValue.transactionHashes);
+    const newHashes = uniqueHashes.filter((hash) => !knownHashes.has(hash));
+
+    if (!newHashes.length) {
+      gasSpentEth = cachedValue.gasSpentEth;
+      source = cachedValue.source === 'on-chain-bake-receipts-exact'
+        ? 'on-chain-bake-receipts-exact'
+        : 'on-chain-bake-logs-approx';
+    } else {
+      gasSpentEth = cachedValue.gasSpentEth + (newHashes.length * feePerTx);
+      source = 'on-chain-bake-logs-approx-incremental';
+    }
+  }
+
+  return {
+    transactionCount: uniqueHashes.length,
+    gasSpentEth,
+    averageFeeEth: feePerTx,
+    source,
+    transactionHashes: uniqueHashes,
+  };
+}
+
 async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, bakeryContract }) {
   const cacheKey = `${String(address).toLowerCase()}:${seasonId}`;
   const cached = checkStatsCache.get(cacheKey);
@@ -1437,14 +1482,15 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
     return cached.value;
   }
 
+  const cachedValue = cached?.value ?? null;
+  let transactionHashes = [];
+
   try {
     const logs = await fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime });
-    const transactionHashes = uniqueTransactionHashes(logs);
-    const cachedValue = cached?.value;
+    transactionHashes = uniqueTransactionHashes(logs);
     let gasSpentEth = null;
     let averageFeeEth = null;
     let source = 'on-chain-bake-receipts-exact';
-    let receiptHashes = transactionHashes;
 
     if (
       cachedValue?.source === 'on-chain-bake-receipts-exact'
@@ -1471,7 +1517,7 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
       gasSpentEth,
       averageFeeEth,
       source,
-      transactionHashes: receiptHashes,
+      transactionHashes,
     };
 
     checkStatsCache.set(cacheKey, {
@@ -1480,19 +1526,18 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
     });
     return value;
   } catch (error) {
-    if (cached) return cached.value;
+    if (!transactionHashes.length) {
+      if (cached) return cached.value;
+      throw error;
+    }
 
     try {
-      const logs = await fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime });
-      const transactionHashes = uniqueTransactionHashes(logs);
       const averageFeeEth = await fetchAverageBakeFeeEth(rpcHttp, transactionHashes);
-      const value = {
-        transactionCount: transactionHashes.length,
-        gasSpentEth: transactionHashes.length * averageFeeEth,
-        averageFeeEth,
-        source: 'on-chain-bake-logs-approx',
+      const value = deriveApproxBakeTxStats({
         transactionHashes,
-      };
+        cachedValue,
+        averageFeeEth,
+      });
 
       checkStatsCache.set(cacheKey, {
         value,
@@ -1500,6 +1545,19 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
       });
       return value;
     } catch (fallbackError) {
+      if (transactionHashes.length) {
+        const value = deriveApproxBakeTxStats({
+          transactionHashes,
+          cachedValue,
+        });
+
+        checkStatsCache.set(cacheKey, {
+          value,
+          generatedAtMs: Date.now(),
+        });
+        return value;
+      }
+      if (cached) return cached.value;
       throw new Error(`${error.message}; exact gas fallback failed: ${fallbackError.message}`);
     }
   }

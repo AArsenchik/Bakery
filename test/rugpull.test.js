@@ -6,6 +6,7 @@ import {
   calculateCookieValues,
   conversationKeyForUpdate,
   createConversationScheduler,
+  deriveApproxBakeTxStats,
   isCheckCommand,
   isHiddenStatsCommand,
   isHelpCommand,
@@ -183,6 +184,24 @@ test('renders the hidden stats message', () => {
   assert.match(message, /Groups: <b>2<\/b>/);
   assert.match(message, /Total chats: <b>81<\/b>/);
   assert.match(message, /Updated: 12 Apr 2026, 13:00:00 MSK/);
+});
+
+test('keeps tx count fresh when gas falls back to approximate mode', () => {
+  const stats = deriveApproxBakeTxStats({
+    transactionHashes: ['0x1', '0x2', '0x3'],
+    cachedValue: {
+      transactionHashes: ['0x1', '0x2'],
+      gasSpentEth: 0.01,
+      averageFeeEth: 0.005,
+      source: 'on-chain-bake-receipts-exact',
+    },
+    averageFeeEth: 0.006,
+  });
+
+  assert.equal(stats.transactionCount, 3);
+  assert.equal(stats.gasSpentEth, 0.016);
+  assert.equal(stats.averageFeeEth, 0.006);
+  assert.equal(stats.source, 'on-chain-bake-logs-approx-incremental');
 });
 
 test('renders a season check report', () => {
