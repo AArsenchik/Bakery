@@ -267,7 +267,7 @@ test('renders a solo season check report with leaderboard-specific wording', () 
     seasonStartTime: 1776434427,
     bakery: { name: 'notblairbear' },
     bakeryValue: null,
-    member: { txCount: '54000000', rank: 77 },
+    member: { txCount: '54000000', bakedTxCount: '88000000', rank: 77 },
     txCount: 3428,
     gasSpentEth: 0.02012,
     gasSpentUsd: 49,
@@ -281,6 +281,7 @@ test('renders a solo season check report with leaderboard-specific wording', () 
     leaderboardShare: 0.00424,
   });
 
+  assert.match(report, /Cookies: <b>8.8K<\/b>/);
   assert.match(report, /Rank: <b>#77<\/b>/);
   assert.match(report, /Leaderboard reward:/);
   assert.match(report, /Leaderboard share: 0.424% of the 70% leaderboard bucket/);

@@ -32,7 +32,7 @@ const SOLO_ACTIVITY_TIERS = [
   { name: 'Tier 2', bucketShare: 0.3 },
   { name: 'Tier 3', bucketShare: 0.2 },
 ];
-const DEFAULT_BAKE_TX_FEE_ETH = 0.00000475;
+const DEFAULT_BAKE_TX_FEE_ETH = 0.00000675;
 const BAKE_EVENT_TOPIC = '0xdfb2307530b804c690e75bb4df897c4d1ebb5e3e1187ce9e25eb7ed674c66db6';
 const RECEIPT_SAMPLE_SIZE = 6;
 const TOP_LIMIT = 5;
@@ -193,6 +193,14 @@ function soloLeaderboardRewardEth(prizePoolEth, rank) {
   const share = soloLeaderboardShareForRank(rank);
   if (share <= 0) return 0;
   return prizePoolEth * SOLO_LEADERBOARD_BUCKET_SHARE * share;
+}
+
+function memberCookiesForPayoutModel(member, payoutModel) {
+  const fieldName = isSoloPayoutModel(payoutModel) && member?.bakedTxCount !== undefined && member?.bakedTxCount !== null
+    ? 'bakedTxCount'
+    : 'txCount';
+
+  return toNumber(member?.[fieldName] ?? 0, `member.${fieldName}`) / 10_000;
 }
 
 function formatMoscowDateTime(value, { includeSeconds = true } = {}) {
@@ -1297,8 +1305,8 @@ export function renderWelcomeMessage() {
   return [
     '<b>Rugpull Bakery Bot</b>',
     '',
-    '<b>/cookie</b> - show the active season reward breakdown',
     '<b>/ch</b> - check a player\'s current season profit/loss',
+    '<b>/cookie</b> - show the active season reward breakdown',
   ].join('\n');
 }
 
@@ -1860,8 +1868,7 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
 }
 
 function estimateRewardForMember({ member, bakery, bakeryValue, season, payoutModel, ethUsd }) {
-  const cookieScale = 10_000;
-  const cookies = toNumber(member.txCount, 'member.txCount') / cookieScale;
+  const cookies = memberCookiesForPayoutModel(member, payoutModel);
 
   if (isSoloPayoutModel(payoutModel)) {
     const rank = normalizeRank(member.rank);
@@ -1928,7 +1935,7 @@ export function renderCheckReport({
   leaderboardShare,
 }) {
   const name = profile?.name ?? identity;
-  const cookies = toNumber(member.txCount, 'member.txCount') / 10_000;
+  const cookies = memberCookiesForPayoutModel(member, payoutModel);
   const isSolo = isSoloPayoutModel(payoutModel);
   const lines = ['<b>Season Check</b>', ''];
   const gasCostText = gasSpentEth === null
@@ -1997,7 +2004,7 @@ function buildCheckCardData({
   leaderboardShare,
 }) {
   const name = profile?.name ?? identity;
-  const cookies = toNumber(member.txCount, 'member.txCount') / 10_000;
+  const cookies = memberCookiesForPayoutModel(member, payoutModel);
   const isSolo = isSoloPayoutModel(payoutModel);
   const gasUnavailable = gasSpentEth === null;
   const roiValue = gasUnavailable || roiPercent === null ? 'N/A' : `${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%`;
