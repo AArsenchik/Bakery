@@ -8,6 +8,30 @@ const DEFAULT_BASE_URL = 'https://www.rugpullbakery.com';
 const DEFAULT_ABSTRACT_RPC_URL = 'https://api.mainnet.abs.xyz';
 const DEFAULT_BAKERY_CONTRACT = '0xFEB79a841D69C08aFCDC7B2BEEC8a6fbbe46C455';
 const DEFAULT_PAYOUT_BPS = [5000, 2000, 1500, 1000, 500];
+const SOLO_LEADERBOARD_BUCKET_SHARE = 0.70;
+const SOLO_ACTIVITY_BUCKET_SHARE = 0.30;
+const SOLO_TOP_TEN_SHARES = [
+  0.075,
+  0.055,
+  0.045,
+  0.035,
+  0.03,
+  0.027,
+  0.024,
+  0.021,
+  0.019,
+  0.017,
+];
+const SOLO_RANGE_SHARES = [
+  { from: 11, to: 25, eachShare: 0.0147 },
+  { from: 26, to: 50, eachShare: 0.0088 },
+  { from: 51, to: 100, eachShare: 0.00424 },
+];
+const SOLO_ACTIVITY_TIERS = [
+  { name: 'Tier 1', bucketShare: 0.5 },
+  { name: 'Tier 2', bucketShare: 0.3 },
+  { name: 'Tier 3', bucketShare: 0.2 },
+];
 const DEFAULT_BAKE_TX_FEE_ETH = 0.00000675;
 const BAKE_EVENT_TOPIC = '0xdfb2307530b804c690e75bb4df897c4d1ebb5e3e1187ce9e25eb7ed674c66db6';
 const RECEIPT_SAMPLE_SIZE = 6;
@@ -34,6 +58,8 @@ const DEFAULT_MAX_SCHEDULED_UPDATES = 24;
 const PROCESSED_UPDATE_TTL_MS = 10 * 60_000;
 const HIDDEN_STATS_COMMAND = '/statsss777';
 const MOSCOW_TIME_ZONE = 'Europe/Moscow';
+const PAYOUT_MODEL_LEGACY = 'legacy-top5';
+const PAYOUT_MODEL_SOLO = 'solo-leaderboard-activity';
 
 const MEDALS = ['🥇', '🥈', '🥉', '🏅', '🏅'];
 const checkSessions = new Map();
@@ -111,6 +137,62 @@ function formatEth(value, maxFractionDigits = 6) {
     minimumFractionDigits: 0,
     maximumFractionDigits: maxFractionDigits,
   });
+}
+
+function formatPercent(value, maxFractionDigits = 3) {
+  return `${formatNumber(value, maxFractionDigits)}%`;
+}
+
+function normalizeRank(value) {
+  const rank = Number(value);
+  if (!Number.isInteger(rank) || rank <= 0) return null;
+  return rank;
+}
+
+function formatRank(rank) {
+  const normalized = normalizeRank(rank);
+  return normalized === null ? 'N/A' : `#${formatNumber(normalized, 0)}`;
+}
+
+function detectPayoutModel(agent, season, bakeries = []) {
+  const releaseFlag = agent?.releaseFlags?.singlePlayerBakeries;
+  const clanMemberCap = Number(agent?.liveState?.gameplayCaps?.clanMemberCap);
+  const hasSoloTopBakeries = Array.isArray(bakeries)
+    && bakeries.length > 0
+    && bakeries.every((bakery) => Number(bakery?.memberCount) === 1);
+
+  if (releaseFlag === true || clanMemberCap === 1 || hasSoloTopBakeries) {
+    return PAYOUT_MODEL_SOLO;
+  }
+
+  return PAYOUT_MODEL_LEGACY;
+}
+
+function isSoloPayoutModel(payoutModel) {
+  return payoutModel === PAYOUT_MODEL_SOLO;
+}
+
+export function soloLeaderboardShareForRank(rank) {
+  const normalizedRank = normalizeRank(rank);
+  if (normalizedRank === null) return 0;
+
+  if (normalizedRank >= 1 && normalizedRank <= SOLO_TOP_TEN_SHARES.length) {
+    return SOLO_TOP_TEN_SHARES[normalizedRank - 1];
+  }
+
+  for (const range of SOLO_RANGE_SHARES) {
+    if (normalizedRank >= range.from && normalizedRank <= range.to) {
+      return range.eachShare;
+    }
+  }
+
+  return 0;
+}
+
+function soloLeaderboardRewardEth(prizePoolEth, rank) {
+  const share = soloLeaderboardShareForRank(rank);
+  if (share <= 0) return 0;
+  return prizePoolEth * SOLO_LEADERBOARD_BUCKET_SHARE * share;
 }
 
 function formatMoscowDateTime(value, { includeSeconds = true } = {}) {
@@ -387,6 +469,7 @@ function serializeCheckIndex(index) {
     baseUrl: index.baseUrl,
     bakeryContract: index.bakeryContract,
     rpcHttp: index.rpcHttp,
+    payoutModel: index.payoutModel,
     season: index.season,
     ethUsd: index.ethUsd,
     seasonStartTime: index.seasonStartTime,
@@ -405,6 +488,7 @@ function deserializeCheckIndex(serialized) {
     baseUrl: serialized.baseUrl ?? env('RUGPULL_BASE_URL', DEFAULT_BASE_URL),
     bakeryContract: serialized.bakeryContract ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT),
     rpcHttp: serialized.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL),
+    payoutModel: serialized.payoutModel ?? ((serialized.season?.id ?? 0) >= 5 ? PAYOUT_MODEL_SOLO : PAYOUT_MODEL_LEGACY),
     season: serialized.season ?? null,
     ethUsd: serialized.ethUsd ?? null,
     seasonStartTime: serialized.seasonStartTime ?? null,
@@ -982,7 +1066,7 @@ function bakeTxFeeEth() {
 }
 
 async function fetchAgent(baseUrl) {
-  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 1_500 });
+  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 4_000 });
 }
 
 async function fetchActiveSeason(baseUrl) {
@@ -1127,6 +1211,37 @@ export function calculateCookieValues({ agent, season, bakeries, ethUsd }) {
   });
 }
 
+export function calculateSoloPayoutBuckets({ season, ethUsd }) {
+  const prizePoolEth = weiToEth(season.prizePool ?? season.finalizedPrizePool);
+  const leaderboardBucketEth = prizePoolEth * SOLO_LEADERBOARD_BUCKET_SHARE;
+  const activityBucketEth = prizePoolEth * SOLO_ACTIVITY_BUCKET_SHARE;
+
+  return {
+    prizePoolEth,
+    leaderboardBucketEth,
+    activityBucketEth,
+    leaderboardRanks: [
+      ...SOLO_TOP_TEN_SHARES.map((share, index) => ({
+        label: `#${index + 1}`,
+        sharePercent: share * 100,
+        rewardEth: leaderboardBucketEth * share,
+        rewardUsd: ethUsd === null ? null : leaderboardBucketEth * share * ethUsd,
+      })),
+      ...SOLO_RANGE_SHARES.map((range) => ({
+        label: `#${range.from}-${range.to}`,
+        sharePercent: range.eachShare * 100,
+        rewardEth: leaderboardBucketEth * range.eachShare,
+        rewardUsd: ethUsd === null ? null : leaderboardBucketEth * range.eachShare * ethUsd,
+      })),
+    ],
+    activityTiers: SOLO_ACTIVITY_TIERS.map((tier) => ({
+      ...tier,
+      rewardEth: activityBucketEth * tier.bucketShare,
+      rewardUsd: ethUsd === null ? null : activityBucketEth * tier.bucketShare * ethUsd,
+    })),
+  };
+}
+
 export function renderValueReport({ values, season, ethUsd, generatedAt }) {
   const lines = ['<b>Value of 1,000 cookies:</b>', ''];
 
@@ -1149,11 +1264,40 @@ export function renderValueReport({ values, season, ethUsd, generatedAt }) {
   return lines.join('\n').trim();
 }
 
+export function renderSoloPayoutReport({ season, ethUsd, generatedAt }) {
+  const payouts = calculateSoloPayoutBuckets({ season, ethUsd });
+  const lines = ['<b>Current Season Payouts</b>', ''];
+
+  lines.push(`Prize pool: ${formatEth(payouts.prizePoolEth, 4)} ETH`);
+  lines.push(`Leaderboard bucket (70%): ${formatEth(payouts.leaderboardBucketEth, 4)} ETH`);
+  lines.push(`Activity bucket (30%): ${formatEth(payouts.activityBucketEth, 4)} ETH`);
+  lines.push('');
+  lines.push('<b>Leaderboard rewards</b>');
+
+  for (const item of payouts.leaderboardRanks) {
+    const rewardUsd = item.rewardUsd === null ? '' : ` ($${formatNumber(item.rewardUsd, 0)})`;
+    lines.push(`${escapeHtml(item.label)}: ${formatPercent(item.sharePercent, 3)} of leaderboard bucket = ${formatEth(item.rewardEth, 6)} ETH${rewardUsd}`);
+  }
+
+  lines.push('');
+  lines.push('<b>Activity tiers</b>');
+  for (const tier of payouts.activityTiers) {
+    const rewardUsd = tier.rewardUsd === null ? '' : ` ($${formatNumber(tier.rewardUsd, 0)})`;
+    lines.push(`${tier.name}: ${formatPercent(tier.bucketShare * 100, 0)} of activity bucket = ${formatEth(tier.rewardEth, 6)} ETH${rewardUsd}`);
+  }
+
+  lines.push('Per-player activity rewards cannot be estimated from the public docs because the tier sizes are not disclosed.');
+  if (ethUsd) lines.push(`ETH/USD: $${formatNumber(ethUsd, 2)}`);
+  lines.push(`Updated: ${formatMoscowDateTime(generatedAt)}`);
+
+  return lines.join('\n').trim();
+}
+
 export function renderWelcomeMessage() {
   return [
     '<b>Rugpull Bakery Bot</b>',
     '',
-    '<b>/cookie</b> - show the current value of 1,000 cookies for the top 5 bakeries',
+    '<b>/cookie</b> - show the active season reward breakdown',
     '<b>/ch</b> - check a player\'s current season profit/loss',
   ].join('\n');
 }
@@ -1183,11 +1327,12 @@ function extractSeasonStartTime(activeSeason, bakeries, members) {
   return candidates.length ? Math.min(...candidates) : null;
 }
 
-function memberFromChef(chef, seasonId) {
+function memberFromChef(chef, seasonId, rank = null) {
   return {
     seasonId,
     address: String(chef.address).toLowerCase(),
     bakeryId: chef.bakeryId,
+    rank,
     txCount: chef.txCount,
     bakedTxCount: chef.bakedTxCount,
     effectiveTxCount: chef.effectiveTxCount,
@@ -1206,6 +1351,7 @@ function mergeMember(existing, next) {
     ...next,
     address: next.address ?? existing.address,
     bakeryId: next.bakeryId ?? existing.bakeryId,
+    rank: next.rank ?? existing.rank,
     txCount: next.txCount ?? existing.txCount,
     bakedTxCount: next.bakedTxCount ?? existing.bakedTxCount,
     effectiveTxCount: next.effectiveTxCount ?? existing.effectiveTxCount,
@@ -1247,6 +1393,7 @@ async function buildCheckIndex() {
   });
 
   const seasonId = season.id;
+  const payoutModel = detectPayoutModel(agent, season, bakeries);
   const rpcHttp = agent?.network?.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL);
   const bakeryContract = agent?.contracts?.bakery ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT);
   const indexedBakeries = bakeries.slice(0, CHECK_MEMBER_BAKERY_LIMIT);
@@ -1259,17 +1406,20 @@ async function buildCheckIndex() {
     ),
     prefetchTopChefSlice(baseUrl, seasonId).catch(() => []),
   ]);
-  const bakeryValues = calculateCookieValues({
-    agent,
-    season,
-    bakeries: bakeries.slice(0, TOP_LIMIT),
-    ethUsd,
-  });
+  const bakeryValues = isSoloPayoutModel(payoutModel)
+    ? []
+    : calculateCookieValues({
+        agent,
+        season,
+        bakeries: bakeries.slice(0, TOP_LIMIT),
+        ethUsd,
+      });
   const bakeryValueMap = new Map(bakeryValues.map((item) => [item.name, item]));
   const bakeryMap = new Map(bakeries.map((bakery) => [bakery.id, bakery]));
 
   const memberMap = new Map();
-  const members = [...memberLists.flat(), ...topChefItems.map((item) => memberFromChef(item, seasonId))];
+  const rankedTopChefs = topChefItems.map((item, index) => memberFromChef(item, seasonId, index + 1));
+  const members = [...memberLists.flat(), ...rankedTopChefs];
   for (const member of members) {
     const address = String(member.address).toLowerCase();
     memberMap.set(address, mergeMember(memberMap.get(address), { ...member, address }));
@@ -1299,6 +1449,7 @@ async function buildCheckIndex() {
     baseUrl,
     bakeryContract,
     rpcHttp,
+    payoutModel,
     season,
     ethUsd,
     bakeryMap,
@@ -1330,18 +1481,22 @@ async function buildMinimalCheckIndex() {
   });
 
   const ethUsd = await fetchEthUsd();
-  const bakeryValues = calculateCookieValues({
-    agent,
-    season,
-    bakeries: bakeries.slice(0, TOP_LIMIT),
-    ethUsd,
-  });
+  const payoutModel = detectPayoutModel(agent, season, bakeries);
+  const bakeryValues = isSoloPayoutModel(payoutModel)
+    ? []
+    : calculateCookieValues({
+        agent,
+        season,
+        bakeries: bakeries.slice(0, TOP_LIMIT),
+        ethUsd,
+      });
 
   return {
     generatedAtMs: Date.now(),
     baseUrl,
     bakeryContract: agent?.contracts?.bakery ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT),
     rpcHttp: agent?.network?.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL),
+    payoutModel,
     season,
     ethUsd,
     bakeryMap: new Map(bakeries.map((bakery) => [bakery.id, bakery])),
@@ -1414,8 +1569,13 @@ async function findChefByAddress(baseUrl, seasonId, address, maxPages = 30) {
 
   for (let page = 0; page < maxPages; page += 1) {
     const { items, nextCursor } = await fetchTopChefsPage(baseUrl, seasonId, 100, cursor);
-    const chef = items.find((item) => String(item.address).toLowerCase() === target);
-    if (chef) return chef;
+    const chefIndex = items.findIndex((item) => String(item.address).toLowerCase() === target);
+    if (chefIndex >= 0) {
+      return {
+        ...items[chefIndex],
+        rank: (page * 100) + chefIndex + 1,
+      };
+    }
     if (!nextCursor) return null;
     cursor = nextCursor;
   }
@@ -1699,12 +1859,36 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
   }
 }
 
-function estimateRewardForMember({ member, bakery, bakeryValue }) {
+function estimateRewardForMember({ member, bakery, bakeryValue, season, payoutModel, ethUsd }) {
   const cookieScale = 10_000;
   const cookies = toNumber(member.txCount, 'member.txCount') / cookieScale;
 
+  if (isSoloPayoutModel(payoutModel)) {
+    const rank = normalizeRank(member.rank);
+    const rewardEth = soloLeaderboardRewardEth(
+      weiToEth(season.prizePool ?? season.finalizedPrizePool),
+      rank,
+    );
+    const rewardUsd = ethUsd === null ? null : rewardEth * ethUsd;
+
+    return {
+      cookies,
+      rewardEth,
+      rewardUsd,
+      rank,
+      leaderboardShare: soloLeaderboardShareForRank(rank),
+      rewardMode: 'solo-leaderboard',
+    };
+  }
+
   if (!bakeryValue) {
-    return { cookies, rewardEth: 0, rewardUsd: null, isTopBakery: false };
+    return {
+      cookies,
+      rewardEth: 0,
+      rewardUsd: null,
+      isTopBakery: false,
+      rewardMode: 'legacy-top5',
+    };
   }
 
   const rewardEth = cookies > 0 ? (bakeryValue.ethPerThousandCookies / COOKIE_UNIT) * cookies : 0;
@@ -1712,13 +1896,20 @@ function estimateRewardForMember({ member, bakery, bakeryValue }) {
     ? null
     : (bakeryValue.usdPerThousandCookies / COOKIE_UNIT) * cookies;
 
-  return { cookies, rewardEth, rewardUsd, isTopBakery: true };
+  return {
+    cookies,
+    rewardEth,
+    rewardUsd,
+    isTopBakery: true,
+    rewardMode: 'legacy-top5',
+  };
 }
 
 export function renderCheckReport({
   identity,
   profile,
   address,
+  payoutModel,
   season,
   seasonStartTime,
   bakery,
@@ -1733,9 +1924,12 @@ export function renderCheckReport({
   netUsd,
   roiPercent,
   ethUsd,
+  rank,
+  leaderboardShare,
 }) {
   const name = profile?.name ?? identity;
   const cookies = toNumber(member.txCount, 'member.txCount') / 10_000;
+  const isSolo = isSoloPayoutModel(payoutModel);
   const lines = ['<b>Season Check</b>', ''];
   const gasCostText = gasSpentEth === null
     ? '<b>N/A</b>'
@@ -1744,25 +1938,34 @@ export function renderCheckReport({
 
   lines.push(`<b>${escapeHtml(name)}</b>`);
   lines.push(`${escapeHtml(shortAddress(address))}`);
-  lines.push(`Clan: <b>${escapeHtml(bakery.name)}</b>${bakeryValue ? ' (top 5)' : ''}`);
+  lines.push(`Clan: <b>${escapeHtml(bakery.name)}</b>${!isSolo && bakeryValue ? ' (top 5)' : ''}`);
   lines.push('');
   lines.push(`Cookies: <b>${compactCookies(cookies)}</b>`);
   lines.push(`Cook tx: <b>${txCount === null ? 'n/a' : formatNumber(txCount, 0)}</b>`);
   lines.push(`Gas cost: ${gasCostText}`);
-  lines.push(`Est. reward: ${rewardText}`);
+  if (isSolo) {
+    lines.push(`Rank: <b>${escapeHtml(formatRank(rank))}</b>`);
+    lines.push(`Leaderboard reward: ${rewardText}`);
+  } else {
+    lines.push(`Est. reward: ${rewardText}`);
+  }
 
   if (gasSpentEth === null) {
-    lines.push('Net ROI: <b>N/A</b>');
+    lines.push(`${isSolo ? 'Leaderboard ROI' : 'Net ROI'}: <b>N/A</b>`);
   } else if (roiPercent === null) {
-    lines.push(`Net ROI: <b>${netEth >= 0 ? '+' : ''}${formatEth(netEth, 4)} ETH</b>${netUsd === null ? '' : ` ($${netUsd >= 0 ? '+' : ''}$${formatNumber(Math.abs(netUsd), 0)})`}`);
+    lines.push(`${isSolo ? 'Leaderboard ROI' : 'Net ROI'}: <b>${netEth >= 0 ? '+' : ''}${formatEth(netEth, 4)} ETH</b>${netUsd === null ? '' : ` ($${netUsd >= 0 ? '+' : ''}$${formatNumber(Math.abs(netUsd), 0)})`}`);
   } else {
-    lines.push(`Net ROI: <b>${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%</b>${netUsd === null ? '' : ` (${netUsd >= 0 ? '+' : '-'}$${formatNumber(Math.abs(netUsd), 0)})`}`);
+    lines.push(`${isSolo ? 'Leaderboard ROI' : 'Net ROI'}: <b>${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%</b>${netUsd === null ? '' : ` (${netUsd >= 0 ? '+' : '-'}$${formatNumber(Math.abs(netUsd), 0)})`}`);
   }
 
   lines.push('');
   if (seasonStartTime) lines.push(`Season started: ${formatMoscowDateTime(new Date(seasonStartTime * 1000))}`);
   lines.push(`Prize pool: ${formatEth(weiToEth(season.prizePool ?? season.finalizedPrizePool), 4)} ETH`);
-  if (bakeryValue) {
+  if (isSolo) {
+    const shareText = leaderboardShare > 0 ? formatPercent(leaderboardShare * 100, 3) : '0%';
+    lines.push(`Leaderboard share: ${shareText} of the 70% leaderboard bucket`);
+    lines.push('Activity payout: separate 30% bucket, not estimated from the public docs because tier sizes are undisclosed.');
+  } else if (bakeryValue) {
     lines.push(`1,000 cookies in ${escapeHtml(bakery.name)}: ${formatEth(bakeryValue.ethPerThousandCookies, 6)} ETH`);
   } else {
     lines.push('Bakery payout: outside top 5 right now');
@@ -1776,6 +1979,7 @@ function buildCheckCardData({
   identity,
   profile,
   address,
+  payoutModel,
   season,
   seasonStartTime,
   bakery,
@@ -1789,21 +1993,28 @@ function buildCheckCardData({
   netUsd,
   roiPercent,
   ethUsd,
+  rank,
+  leaderboardShare,
 }) {
   const name = profile?.name ?? identity;
   const cookies = toNumber(member.txCount, 'member.txCount') / 10_000;
+  const isSolo = isSoloPayoutModel(payoutModel);
   const gasUnavailable = gasSpentEth === null;
   const roiValue = gasUnavailable || roiPercent === null ? 'N/A' : `${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%`;
   const netUsdValue = gasUnavailable || netUsd === null ? null : `${netUsd >= 0 ? '+' : '-'}${formatUsdCompact(netUsd, 0)}`;
   const gasUsdValue = gasSpentUsd === null ? null : formatUsdCompact(gasSpentUsd, 0);
   const rewardUsdValue = rewardUsd === null ? null : formatUsdCompact(rewardUsd, 0);
   const oneKValue = bakeryValue ? `${formatEth(bakeryValue.ethPerThousandCookies, 6)} ETH` : 'OUTSIDE TOP 5';
+  const rankValue = formatRank(rank);
+  const rankSubvalue = leaderboardShare > 0
+    ? `LB SHARE ${formatPercent(leaderboardShare * 100, 3)}`
+    : 'ACTIVITY 30% SEPARATE';
 
   return {
     title: 'Season Check',
     name,
     address: shortAddress(address),
-    clan: `Clan: ${bakery.name}${bakeryValue ? ' (top 5)' : ''}`,
+    clan: `Clan: ${bakery.name}${!isSolo && bakeryValue ? ' (top 5)' : ''}`,
     avatarUrl: profile?.profilePictureUrl ?? null,
     tiles: [
       {
@@ -1827,7 +2038,7 @@ function buildCheckCardData({
         subvalueColor: '#ffd8c7',
       },
       {
-        label: 'Est reward',
+        label: isSolo ? 'LB reward' : 'Est reward',
         value: `${formatEth(rewardEth, 4)} ETH`,
         subvalue: rewardUsdValue,
         accent: '#ffd76a',
@@ -1835,21 +2046,30 @@ function buildCheckCardData({
         subvalueColor: '#ffeec4',
       },
       {
-        label: 'Net ROI',
+        label: isSolo ? 'LB ROI' : 'Net ROI',
         value: roiValue,
         subvalue: netUsdValue,
         accent: roiPercent !== null && roiPercent >= 0 ? '#6df2a5' : '#ff7f73',
         valueColor: roiPercent !== null && roiPercent >= 0 ? '#b9ffd0' : '#ffb4a5',
         subvalueColor: roiPercent !== null && roiPercent >= 0 ? '#dbffe7' : '#ffd7cb',
       },
-      {
-        label: '1K value',
-        value: oneKValue,
-        subvalue: ethUsd ? `ETH/USD ${formatUsdCompact(ethUsd, 2)}` : null,
-        accent: '#b27cff',
-        valueColor: '#e9e2ff',
-        subvalueColor: '#d7cef8',
-      },
+      isSolo
+        ? {
+            label: 'Rank',
+            value: rankValue,
+            subvalue: rankSubvalue,
+            accent: '#b27cff',
+            valueColor: '#e9e2ff',
+            subvalueColor: '#d7cef8',
+          }
+        : {
+            label: '1K value',
+            value: oneKValue,
+            subvalue: ethUsd ? `ETH/USD ${formatUsdCompact(ethUsd, 2)}` : null,
+            accent: '#b27cff',
+            valueColor: '#e9e2ff',
+            subvalueColor: '#d7cef8',
+          },
     ],
   };
 }
@@ -1873,6 +2093,7 @@ export async function buildCheckReport(identity) {
         seasonId: chef.seasonId ?? index.season.id,
         address,
         bakeryId: chef.bakeryId,
+        rank: chef.rank ?? null,
         txCount: chef.txCount,
         bakedTxCount: chef.bakedTxCount,
         effectiveTxCount: chef.effectiveTxCount,
@@ -1941,7 +2162,25 @@ export async function buildCheckReport(identity) {
   } else if (!profile && profileLookup && !Array.isArray(profileLookup)) {
     profile = profileLookup;
   }
-  const reward = estimateRewardForMember({ member, bakery, bakeryValue });
+  let memberRank = normalizeRank(member.rank);
+  if (isSoloPayoutModel(index.payoutModel) && memberRank === null) {
+    const rankedChef = await findChefByAddress(index.baseUrl, index.season.id, address).catch(() => null);
+    if (rankedChef?.rank) {
+      memberRank = normalizeRank(rankedChef.rank);
+      member = mergeMember(member, { rank: memberRank });
+      index.memberMap.set(address, member);
+      saveCheckIndexCache(index).catch(() => {});
+    }
+  }
+
+  const reward = estimateRewardForMember({
+    member,
+    bakery,
+    bakeryValue,
+    season: index.season,
+    payoutModel: index.payoutModel,
+    ethUsd: index.ethUsd,
+  });
 
   const txCount = txStats.transactionCount;
   const gasFeeEth = txStats.averageFeeEth ?? bakeTxFeeEth();
@@ -1959,6 +2198,7 @@ export async function buildCheckReport(identity) {
       identity,
       profile,
       address,
+      payoutModel: index.payoutModel,
       season: index.season,
       seasonStartTime: index.seasonStartTime,
       bakery,
@@ -1972,11 +2212,14 @@ export async function buildCheckReport(identity) {
       netUsd,
       roiPercent,
       ethUsd: index.ethUsd,
+      rank: reward.rank ?? memberRank,
+      leaderboardShare: reward.leaderboardShare ?? 0,
     }),
     text: renderCheckReport({
       identity,
       profile,
       address,
+      payoutModel: index.payoutModel,
       season: index.season,
       seasonStartTime: index.seasonStartTime,
       bakery,
@@ -1991,6 +2234,8 @@ export async function buildCheckReport(identity) {
       netUsd,
       roiPercent,
       ethUsd: index.ethUsd,
+      rank: reward.rank ?? memberRank,
+      leaderboardShare: reward.leaderboardShare ?? 0,
     }),
   };
 }
@@ -2013,6 +2258,11 @@ async function buildReport() {
     };
   });
   const ethUsd = await fetchEthUsd();
+  const payoutModel = detectPayoutModel(agent, season, bakeries);
+
+  if (isSoloPayoutModel(payoutModel)) {
+    return renderSoloPayoutReport({ season, ethUsd, generatedAt: new Date() });
+  }
 
   const values = calculateCookieValues({ agent, season, bakeries, ethUsd });
   return renderValueReport({ values, season, ethUsd, generatedAt: new Date() });
