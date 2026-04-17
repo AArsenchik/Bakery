@@ -32,7 +32,7 @@ const SOLO_ACTIVITY_TIERS = [
   { name: 'Tier 2', bucketShare: 0.3 },
   { name: 'Tier 3', bucketShare: 0.2 },
 ];
-const DEFAULT_BAKE_TX_FEE_ETH = 0.00000675;
+const DEFAULT_BAKE_TX_FEE_ETH = 0.00000475;
 const BAKE_EVENT_TOPIC = '0xdfb2307530b804c690e75bb4df897c4d1ebb5e3e1187ce9e25eb7ed674c66db6';
 const RECEIPT_SAMPLE_SIZE = 6;
 const TOP_LIMIT = 5;
