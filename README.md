@@ -8,6 +8,7 @@
 2. Бот читает `leaderboard.getActiveSeason`, чтобы взять `prizePool`.
 3. Для legacy-сезонов с payout по bakery balance бот считает стоимость `1,000` cookies по текущему распределению.
 4. Для solo-сезонов бот показывает breakdown leaderboard/activity payout по текущему пулу.
+5. Для нового division-сезона бот показывает bucket’ы `Standard leaderboard / Standard activity / Open leaderboard` и считает `/ch` по division-specific payout table.
 
 ## Запуск
 
@@ -56,7 +57,8 @@ npm start
 - В группах бот ждет ответ только от того пользователя, который вызвал `/ch`, и безопаснее всего отвечать reply на prompt бота.
 - Можно сразу отправить `/ch username` или `/ch 0x...` в одном сообщении.
 - В solo-сезонах `/ch` считает leaderboard reward по текущему rank игрока.
-- Activity bucket в solo-сезонах считается отдельно, но docs не раскрывают размеры activity tiers, поэтому бот не оценивает per-player activity reward и явно пишет об этом.
+- В division-сезоне `/ch` определяет bakery division (`Standard` или `Open`) и считает leaderboard reward по актуальной payout table этой division.
+- Для `Standard activity` бот не оценивает per-player reward, потому что публичные docs не раскрывают размер activity tiers.
 - `Cook tx` считается по on-chain `Bake`-логам bakery-контракта для адреса и сезона.
 - `Gas cost` считается из этого количества `Bake`-транзакций и средней комиссии по реальным `Bake` receipts.
 - Если генерация или отправка картинки не удалась, бот автоматически делает fallback на текстовое сообщение.

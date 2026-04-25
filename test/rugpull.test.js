@@ -3,6 +3,7 @@ import test from 'node:test';
 import { renderStatCardPng } from '../src/card.js';
 
 import {
+  calculateDivisionPayoutBuckets,
   calculateCookieValues,
   conversationKeyForUpdate,
   createConversationScheduler,
@@ -13,6 +14,7 @@ import {
   isValueCommand,
   renderHiddenStatsMessage,
   renderCheckReport,
+  renderDivisionPayoutReport,
   renderSoloPayoutReport,
   renderWelcomeMessage,
   renderValueReport,
@@ -80,6 +82,35 @@ test('renders a solo payout report for the current season', () => {
   assert.match(report, /#1: 7.5% of leaderboard bucket = 0.525 ETH/);
   assert.match(report, /#51-100: 0.424% of leaderboard bucket = 0.02968 ETH/);
   assert.match(report, /tier sizes are not disclosed/i);
+});
+
+test('calculates season 4 division payout buckets', () => {
+  const payouts = calculateDivisionPayoutBuckets({
+    season: { id: 6, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+  });
+
+  assert.equal(payouts.standardLeaderboardBucketEth, 2.5);
+  assert.equal(payouts.standardActivityBucketEth, 3.5);
+  assert.equal(payouts.openLeaderboardBucketEth, 4);
+  assert.equal(payouts.standardLeaderboardRows[4].rewardEth, 0.04);
+  assert.equal(payouts.openLeaderboardRows[10].rewardEth, 0.0896);
+});
+
+test('renders a division payout report for season 4', () => {
+  const report = renderDivisionPayoutReport({
+    season: { id: 6, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+    generatedAt: new Date('2026-04-25T08:00:00.000Z'),
+  });
+
+  assert.match(report, /Standard leaderboard bucket \(25%\): 2.5 ETH/);
+  assert.match(report, /Standard activity bucket \(35%\): 3.5 ETH/);
+  assert.match(report, /Open leaderboard bucket \(40%\): 4 ETH/);
+  assert.match(report, /#4-10: 3.2% of Standard leaderboard bucket = 0.08 ETH/);
+  assert.match(report, /Tier A: 50% of Standard activity bucket = 1.75 ETH/);
+  assert.match(report, /#11-25: 2.24% of Open leaderboard bucket = 0.0896 ETH/);
+  assert.match(report, /Score scales \+5% per day/);
 });
 
 test('recognizes direct and group Telegram commands', () => {
@@ -287,6 +318,42 @@ test('renders a solo season check report with leaderboard-specific wording', () 
   assert.match(report, /Leaderboard share: 0.424% of the 70% leaderboard bucket/);
   assert.match(report, /Activity payout: separate 30% bucket/i);
   assert.match(report, /Leaderboard ROI: <b>\+47.5%<\/b>/);
+});
+
+test('renders a division season check report with standard-specific wording', () => {
+  const report = renderCheckReport({
+    identity: 'Arcanum',
+    profile: { name: 'Arcanum' },
+    address: '0x4c29b502f5270ce4f4e70b4a7deecaaec21e3c8c',
+    payoutModel: 'division-standard-open',
+    season: { id: 6, prizePool: '10000000000000000000' },
+    seasonStartTime: 1777000000,
+    bakery: { name: 'Arcanum', tierId: 1 },
+    bakeryValue: null,
+    member: { txCount: '170000000', bakedTxCount: '195364000' },
+    txCount: 11643,
+    gasSpentEth: 0.08062,
+    gasSpentUsd: 196,
+    rewardEth: 0.0583,
+    rewardUsd: 142,
+    netEth: -0.02232,
+    netUsd: -54,
+    roiPercent: -27.6,
+    ethUsd: 2447.7,
+    rank: 18,
+    leaderboardShare: 0.016,
+    divisionTierId: 1,
+    divisionName: 'Standard',
+    hasActivityBucket: true,
+  });
+
+  assert.match(report, /Clan: <b>Arcanum<\/b> \(Standard\)/);
+  assert.match(report, /Cookies: <b>19.5K<\/b>/);
+  assert.match(report, /Rank: <b>#18<\/b>/);
+  assert.match(report, /Standard leaderboard reward:/);
+  assert.match(report, /Standard leaderboard share: 1.6% of the 25% standard leaderboard bucket/);
+  assert.match(report, /Standard activity reward: separate 35% bucket/i);
+  assert.match(report, /Standard ROI: <b>-27.6%<\/b>/);
 });
 
 test('renders a png stat card buffer', async () => {
