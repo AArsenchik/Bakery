@@ -2851,9 +2851,16 @@ async function sendValueReport(chatId) {
 async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
   refreshCheckIndexInBackground();
   const group = isGroupChat(chat);
-  const promptText = group
-    ? 'Reply to this message with the Rugpull Bakery username or the wallet address in the <code>0x...</code> format. I will show profit/loss.'
-    : 'Send the Rugpull Bakery username or the wallet address in the <code>0x...</code> format. I will show profit/loss.';
+  const promptLines = [
+    group
+      ? 'Reply to this message with the Rugpull Bakery username or the wallet address in the <code>0x...</code> format.'
+      : 'Send the Rugpull Bakery username or the wallet address in the <code>0x...</code> format.',
+    'I will show profit/loss.',
+    '',
+    'Open: leaderboard reward is included.',
+    'Standard: leaderboard reward is included, activity reward is separate.',
+  ];
+  const promptText = promptLines.join('\n');
   const promptMessage = await sendMessage(chatId, promptText, {
     reply_to_message_id: sourceMessageId,
     reply_markup: {
