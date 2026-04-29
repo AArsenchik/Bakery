@@ -7,6 +7,7 @@ import {
   calculateCookieValues,
   conversationKeyForUpdate,
   createConversationScheduler,
+  detectPayoutModel,
   deriveApproxBakeTxStats,
   isCheckCommand,
   isHiddenStatsCommand,
@@ -111,6 +112,16 @@ test('renders a division payout report for season 4', () => {
   assert.match(report, /Tier A: 50% of Standard activity bucket = 1.75 ETH/);
   assert.match(report, /#11-25: 2.24% of Open leaderboard bucket = 0.0896 ETH/);
   assert.match(report, /Score scales \+5% per day/);
+});
+
+test('prefers division payout model over solo fallback for season 6-style data', () => {
+  const payoutModel = detectPayoutModel(
+    { liveState: { gameplayCaps: { cookieScale: 10000 } } },
+    { id: 6 },
+    [{ id: 123, memberCount: 1 }],
+  );
+
+  assert.equal(payoutModel, 'division-standard-open');
 });
 
 test('recognizes direct and group Telegram commands', () => {

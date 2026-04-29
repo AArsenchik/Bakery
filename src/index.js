@@ -199,16 +199,19 @@ function inferPayoutModelFromSeasonId(seasonId) {
   return PAYOUT_MODEL_LEGACY;
 }
 
-function detectPayoutModel(agent, season, bakeries = []) {
+export function detectPayoutModel(agent, season, bakeries = []) {
   const bakeryTiers = agent?.liveState?.gameplayCaps?.bakeryTiers;
   const releaseFlag = agent?.releaseFlags?.singlePlayerBakeries;
   const clanMemberCap = Number(agent?.liveState?.gameplayCaps?.clanMemberCap);
   const hasDivisionTiers = Array.isArray(bakeryTiers) && bakeryTiers.length >= 2;
+  const inferredPayoutModel = inferPayoutModelFromSeasonId(season?.id);
+  const hasDivisionTopBakeries = Array.isArray(bakeries)
+    && bakeries.some((bakery) => Number(bakery?.tierId) > 0 || bakery?.score !== undefined);
   const hasSoloTopBakeries = Array.isArray(bakeries)
     && bakeries.length > 0
     && bakeries.every((bakery) => Number(bakery?.memberCount) === 1);
 
-  if (hasDivisionTiers) {
+  if (hasDivisionTiers || hasDivisionTopBakeries || inferredPayoutModel === PAYOUT_MODEL_DIVISIONS) {
     return PAYOUT_MODEL_DIVISIONS;
   }
 
@@ -216,7 +219,7 @@ function detectPayoutModel(agent, season, bakeries = []) {
     return PAYOUT_MODEL_SOLO;
   }
 
-  return inferPayoutModelFromSeasonId(season?.id);
+  return inferredPayoutModel;
 }
 
 function isSoloPayoutModel(payoutModel) {
@@ -596,12 +599,15 @@ function serializeCheckIndex(index) {
 
 function deserializeCheckIndex(serialized) {
   if (!serialized || typeof serialized !== 'object') return null;
+  const inferredPayoutModel = inferPayoutModelFromSeasonId(serialized.season?.id ?? 0);
   return {
     generatedAtMs: serialized.generatedAtMs ?? 0,
     baseUrl: serialized.baseUrl ?? env('RUGPULL_BASE_URL', DEFAULT_BASE_URL),
     bakeryContract: serialized.bakeryContract ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT),
     rpcHttp: serialized.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL),
-    payoutModel: serialized.payoutModel ?? inferPayoutModelFromSeasonId(serialized.season?.id ?? 0),
+    payoutModel: inferredPayoutModel === PAYOUT_MODEL_DIVISIONS
+      ? PAYOUT_MODEL_DIVISIONS
+      : (serialized.payoutModel ?? inferredPayoutModel),
     season: serialized.season ?? null,
     ethUsd: serialized.ethUsd ?? null,
     seasonStartTime: serialized.seasonStartTime ?? null,
