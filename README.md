@@ -60,7 +60,8 @@ npm start
 - В solo-сезонах `/ch` считает leaderboard reward по текущему rank игрока.
 - В division-сезоне `/ch` определяет bakery division (`Standard` или `Open`) и считает leaderboard reward по актуальной payout table этой division.
 - `Cook tx` считается по on-chain `Bake`-логам bakery-контракта для адреса и сезона.
-- `Gas cost` считается из этого количества `Bake`-транзакций и средней комиссии по реальным `Bake` receipts.
+- `Gas cost` считается как сумма реальной fee каждой найденной `Bake`-транзакции через `zks_getTransactionDetails`/receipts.
+- Если точные fee временно недоступны, бот показывает `N/A`, а не подставляет приблизительную сумму.
 - Если генерация или отправка картинки не удалась, бот автоматически делает fallback на текстовое сообщение.
 
 ## Проверка без Telegram
@@ -77,14 +78,17 @@ ETH_USD_FALLBACK=2194 npm run once
 
 ## Bake Fee Fallback
 
-Для будущего расчета `/ch` в боте зафиксирован fallback комиссии одного `bake`:
+По умолчанию `/ch` не использует фиксированную комиссию для `Gas cost`: бот суммирует реальные on-chain fee по каждой bake-транзакции.
+
+Фиксированный fallback ниже нужен только если явно включить approximate mode:
 
 ```text
 0.00000675 ETH
 ```
 
-Это запасной fallback на случай, если бот не смог получить точные on-chain fee. При желании можно переопределить через `.env`:
+Чтобы временно вернуть старое приблизительное поведение при проблемах RPC, можно включить approximate fallback через `.env`:
 
 ```bash
+ALLOW_APPROX_GAS_FALLBACK=true
 BAKE_TX_FEE_ETH=0.00000675
 ```

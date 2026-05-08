@@ -10,6 +10,7 @@ import {
   createConversationScheduler,
   detectPayoutModel,
   deriveApproxBakeTxStats,
+  gasSpentEthFromTxStats,
   isCheckCommand,
   isHiddenStatsCommand,
   isHelpCommand,
@@ -326,6 +327,22 @@ test('keeps tx count fresh when gas falls back to approximate mode', () => {
   assert.equal(stats.gasSpentEth, 0.016);
   assert.equal(stats.averageFeeEth, 0.006);
   assert.equal(stats.source, 'on-chain-bake-logs-approx-incremental');
+});
+
+test('does not invent gas cost when exact fees are unavailable', () => {
+  assert.equal(gasSpentEthFromTxStats({
+    transactionCount: 120,
+    gasSpentEth: null,
+    averageFeeEth: null,
+    source: 'on-chain-bake-logs-fees-unavailable',
+  }), null);
+
+  assert.equal(gasSpentEthFromTxStats({
+    transactionCount: 120,
+    gasSpentEth: 0.00123,
+    averageFeeEth: 0.00001025,
+    source: 'on-chain-bake-fees-exact',
+  }), 0.00123);
 });
 
 test('renders a season check report', () => {

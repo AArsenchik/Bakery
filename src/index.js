@@ -1222,6 +1222,10 @@ function bakeTxFeeEth() {
   return toNumber(env('BAKE_TX_FEE_ETH', String(DEFAULT_BAKE_TX_FEE_ETH)), 'BAKE_TX_FEE_ETH');
 }
 
+function allowApproxGasFallback() {
+  return String(env('ALLOW_APPROX_GAS_FALLBACK', 'false')).toLowerCase() === 'true';
+}
+
 async function fetchAgent(baseUrl) {
   return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 4_000 });
 }
@@ -2019,49 +2023,65 @@ async function fetchAverageBakeFeeEth(rpcHttp, transactionHashes) {
   return fees.reduce((sum, entry) => sum + entry.feeEth, 0) / fees.length;
 }
 
+async function fetchExactFeeEntriesForHashes(rpcHttp, transactionHashes) {
+  if (!transactionHashes.length) return [];
+
+  try {
+    const details = await rpcBatchRequest(
+      rpcHttp,
+      transactionHashes.map((hash) => ({ method: 'zks_getTransactionDetails', params: [hash] })),
+      {
+        timeoutMs: 20_000,
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+
+    let { fees, missingHashes } = validateFeeEntries(transactionHashes, details, transactionDetailFeeEth);
+    if (missingHashes.length) {
+      const individual = await backfillMissingFeeEntries(rpcHttp, missingHashes);
+      fees = [...fees, ...individual.fees];
+      missingHashes = individual.missingHashes;
+    }
+
+    if (missingHashes.length) {
+      throw new Error(`Could not fetch ${missingHashes.length} exact fee(s)`);
+    }
+
+    return fees;
+  } catch (error) {
+    if (transactionHashes.length <= 1) {
+      const individual = await backfillMissingFeeEntries(rpcHttp, transactionHashes);
+      if (!individual.missingHashes.length) return individual.fees;
+      throw new Error(`${error.message}; exact single-tx fee lookup failed`);
+    }
+
+    const midpoint = Math.ceil(transactionHashes.length / 2);
+    const [left, right] = await Promise.all([
+      fetchExactFeeEntriesForHashes(rpcHttp, transactionHashes.slice(0, midpoint)),
+      fetchExactFeeEntriesForHashes(rpcHttp, transactionHashes.slice(midpoint)),
+    ]);
+
+    return [...left, ...right];
+  }
+}
+
 async function fetchTotalBakeFeeEth(rpcHttp, transactionHashes, {
   batchSize = 250,
   maxConcurrentBatches = 4,
 } = {}) {
-  if (!transactionHashes.length) return 0;
+  const uniqueHashes = [...new Set(transactionHashes)];
+  if (!uniqueHashes.length) return 0;
 
-  const batches = chunk(transactionHashes, batchSize);
+  const batches = chunk(uniqueHashes, batchSize);
   const limiter = createLimiter(Math.max(1, maxConcurrentBatches));
 
-  const batchResults = await Promise.all(
-    batches.map((batch) => limiter.run(async () => {
-      const details = await rpcBatchRequest(
-        rpcHttp,
-        batch.map((hash) => ({ method: 'zks_getTransactionDetails', params: [hash] })),
-        {
-          timeoutMs: 20_000,
-          maxBuffer: 16 * 1024 * 1024,
-        },
-      );
-
-      return validateFeeEntries(batch, details, transactionDetailFeeEth);
-    })),
+  const feeGroups = await Promise.all(
+    batches.map((batch) => limiter.run(() => fetchExactFeeEntriesForHashes(rpcHttp, batch))),
   );
 
-  let total = 0;
-  let missingHashes = [];
-
-  for (const result of batchResults) {
-    total += result.fees.reduce((sum, entry) => sum + entry.feeEth, 0);
-    missingHashes.push(...result.missingHashes);
-  }
-
-  if (missingHashes.length) {
-    const individual = await backfillMissingFeeEntries(rpcHttp, [...new Set(missingHashes)]);
-    total += individual.fees.reduce((sum, entry) => sum + entry.feeEth, 0);
-    missingHashes = individual.missingHashes;
-  }
-
-  if (missingHashes.length) {
-    throw new Error(`Could not fetch ${missingHashes.length} receipt(s) for exact gas calculation`);
-  }
-
-  return total;
+  return feeGroups
+    .flat()
+    .reduce((sum, entry) => sum + entry.feeEth, 0);
 }
 
 export function deriveApproxBakeTxStats({
@@ -2107,6 +2127,10 @@ export function deriveApproxBakeTxStats({
     source,
     transactionHashes: uniqueHashes,
   };
+}
+
+export function gasSpentEthFromTxStats(txStats) {
+  return Number.isFinite(txStats?.gasSpentEth) ? txStats.gasSpentEth : null;
 }
 
 async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, bakeryContract }) {
@@ -2172,6 +2196,23 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
     if (!transactionHashes.length) {
       if (cached) return cached.value;
       throw error;
+    }
+
+    if (!allowApproxGasFallback()) {
+      console.warn(`Exact gas calculation failed for ${address}: ${error.message}`);
+      const value = {
+        transactionCount: transactionHashes.length,
+        gasSpentEth: null,
+        averageFeeEth: null,
+        source: 'on-chain-bake-logs-fees-unavailable',
+        transactionHashes,
+      };
+
+      checkStatsCache.set(cacheKey, {
+        value,
+        generatedAtMs: Date.now(),
+      });
+      return value;
     }
 
     try {
@@ -2715,10 +2756,7 @@ export async function buildCheckReport(identity) {
   });
 
   const txCount = txStats.transactionCount;
-  const gasFeeEth = txStats.averageFeeEth ?? bakeTxFeeEth();
-  const gasSpentEth = Number.isFinite(txStats.gasSpentEth)
-    ? txStats.gasSpentEth
-    : (txCount === null ? null : txCount * gasFeeEth);
+  const gasSpentEth = gasSpentEthFromTxStats(txStats);
   const gasSpentUsd = gasSpentEth === null || index.ethUsd === null ? null : gasSpentEth * index.ethUsd;
   const netEth = gasSpentEth === null ? reward.rewardEth : reward.rewardEth - gasSpentEth;
   const netUsd = reward.rewardUsd === null || gasSpentUsd === null ? null : reward.rewardUsd - gasSpentUsd;
