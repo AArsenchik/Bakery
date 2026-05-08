@@ -3045,8 +3045,9 @@ async function sendHiddenStats(chatId) {
 
 async function broadcastMessageToKnownChats(text) {
   await loadKnownChats();
+  await loadBaselineKnownChats();
 
-  const chatIds = [...knownChats];
+  const chatIds = [...new Set([...baselineKnownChats, ...knownChats])];
   let sent = 0;
   let failed = 0;
 
