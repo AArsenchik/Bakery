@@ -4,6 +4,7 @@ import { renderStatCardPng } from '../src/card.js';
 
 import {
   calculateDivisionPayoutBuckets,
+  calculateGroupedScorePayout,
   calculateCookieValues,
   conversationKeyForUpdate,
   createConversationScheduler,
@@ -16,6 +17,7 @@ import {
   renderHiddenStatsMessage,
   renderCheckReport,
   renderDivisionPayoutReport,
+  renderGroupedScorePayoutReport,
   renderSoloPayoutReport,
   renderWelcomeMessage,
   renderValueReport,
@@ -114,6 +116,37 @@ test('renders a division payout report for season 4', () => {
   assert.match(report, /Score scales \+5% per day/);
 });
 
+test('calculates season 5 grouped score-weighted payout', () => {
+  const payout = calculateGroupedScorePayout({
+    season: { id: 7, prizePool: '10000000000000000000' },
+    topBakeries: [
+      { id: 1, rank: 1, score: '600000000' },
+      { id: 2, rank: 2, score: '400000000' },
+    ],
+    bakery: { id: 1, rank: 1, score: '600000000' },
+    member: { address: '0x1', score: '150000000' },
+    ethUsd: 2000,
+  });
+
+  assert.equal(payout.rewardEth, 1.5);
+  assert.equal(payout.rewardUsd, 3000);
+  assert.equal(payout.bakeryShare, 0.6);
+  assert.equal(payout.memberShare, 0.25);
+});
+
+test('renders a grouped score payout report for season 5', () => {
+  const report = renderGroupedScorePayoutReport({
+    season: { id: 7, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+    generatedAt: new Date('2026-05-08T10:00:00.000Z'),
+  });
+
+  assert.match(report, /Placement pool \(100%\): 10 ETH/);
+  assert.match(report, /Top 10 bakeries qualify by final score/);
+  assert.match(report, /Bakery payout = bakery score \/ top-10 total score \* prize pool/);
+  assert.match(report, /Bakery cap: 50 members/);
+});
+
 test('prefers division payout model over solo fallback for season 6-style data', () => {
   const payoutModel = detectPayoutModel(
     { liveState: { gameplayCaps: { cookieScale: 10000 } } },
@@ -122,6 +155,29 @@ test('prefers division payout model over solo fallback for season 6-style data',
   );
 
   assert.equal(payoutModel, 'division-standard-open');
+});
+
+test('prefers grouped score payout model for season 5 live data', () => {
+  const payoutModel = detectPayoutModel(
+    {
+      liveState: {
+        marketingSeason: 5,
+        gameplayCaps: {
+          clanMemberCap: 50,
+          bakeryTiers: [{ tierId: 1, name: 'Grouped', enabled: true }],
+        },
+      },
+      coreMechanics: {
+        leaderboardsAndPayouts: {
+          season5PlacementPool: { qualifiedBakeryCount: 10 },
+        },
+      },
+    },
+    { id: 7 },
+    [{ id: 123, memberCount: 23, tierId: 1, score: '0' }],
+  );
+
+  assert.equal(payoutModel, 'grouped-score-top10');
 });
 
 test('recognizes direct and group Telegram commands', () => {
@@ -365,6 +421,39 @@ test('renders a division season check report with standard-specific wording', ()
   assert.match(report, /Standard leaderboard share: 1.6% of the 25% standard leaderboard bucket/);
   assert.match(report, /Standard activity reward: separate 35% bucket/i);
   assert.match(report, /Standard ROI: <b>-27.6%<\/b>/);
+});
+
+test('renders a grouped score season check report', () => {
+  const report = renderCheckReport({
+    identity: 'Zoloto23',
+    profile: { name: 'Zoloto23' },
+    address: '0x84596032e367134926cb74fb530d41fcba6020e6',
+    payoutModel: 'grouped-score-top10',
+    season: { id: 7, prizePool: '10000000000000000000' },
+    seasonStartTime: 1778252400,
+    bakery: { name: 'ZolotoGang', rank: 6 },
+    bakeryValue: null,
+    member: { txCount: '880000000', bakedTxCount: '882000000', score: '150000000' },
+    txCount: 55316,
+    gasSpentEth: 0.33751,
+    gasSpentUsd: 778,
+    rewardEth: 1.5,
+    rewardUsd: 3000,
+    netEth: 1.16249,
+    netUsd: 2222,
+    roiPercent: 344.4,
+    ethUsd: 2300,
+    rank: 6,
+    leaderboardShare: 0.6,
+    memberScoreShare: 0.25,
+  });
+
+  assert.match(report, /Clan: <b>ZolotoGang<\/b> \(top 10\)/);
+  assert.match(report, /Rank: <b>#6<\/b>/);
+  assert.match(report, /Est\. reward:/);
+  assert.match(report, /Bakery score share: 60% of the 100% top-10 placement pool/);
+  assert.match(report, /Member score share: 25% of bakery score/);
+  assert.match(report, /S5 payout is score-weighted/);
 });
 
 test('renders a png stat card buffer', async () => {

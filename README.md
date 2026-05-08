@@ -1,14 +1,15 @@
 # Rugpull Bakery Telegram Bot
 
-Бот умеет показывать актуальную payout-модель активного сезона Rugpull Bakery и делать `/ch` по игроку в активном сезоне.
+Бот показывает актуальную payout-модель активного сезона Rugpull Bakery и делает `/ch` по игроку в активном сезоне.
 
 ## Как считается
 
 1. Бот читает live `agent.json`, чтобы понять активную игровую модель сезона.
-2. Бот читает `leaderboard.getActiveSeason`, чтобы взять `prizePool`.
+2. Бот читает `leaderboard.getActiveSeason`, чтобы взять текущий `prizePool`.
 3. Для legacy-сезонов с payout по bakery balance бот считает стоимость `1,000` cookies по текущему распределению.
 4. Для solo-сезонов бот показывает breakdown leaderboard/activity payout по текущему пулу.
-5. Для нового division-сезона бот показывает bucket’ы `Standard leaderboard / Standard activity / Open leaderboard` и считает `/ch` по division-specific payout table.
+5. Для division-сезона бот показывает bucket'ы `Standard leaderboard / Standard activity / Open leaderboard` и считает `/ch` по division-specific payout table.
+6. Для Season 5 бот использует grouped score модель: топ-10 bakeries делят 100% prize pool по доле bakery score, а внутри bakery reward делится по доле member score contribution.
 
 ## Запуск
 
@@ -30,9 +31,7 @@ npm start
 ```text
 /start
 /help
-/cookies
-/value
-/price
+/cookie
 /ch
 ```
 
@@ -43,10 +42,10 @@ npm start
 1. Отправляешь `/ch`
 2. Бот просит `username` из игры или `wallet address`
 3. Бот показывает:
-   - текущий клан игрока
+   - текущую bakery игрока
    - сколько у него cookies
    - сколько `Bake`-транзакций найдено
-   - сколько примерно ушло на gas
+   - сколько ушло на gas
    - `est. reward` по текущей формуле для активного сезона
    - текущий `ROI`
    - и по умолчанию отправляет это как image card, а не как текст
@@ -56,9 +55,10 @@ npm start
 - `/ch` сейчас считает по активному сезону.
 - В группах бот ждет ответ только от того пользователя, который вызвал `/ch`, и безопаснее всего отвечать reply на prompt бота.
 - Можно сразу отправить `/ch username` или `/ch 0x...` в одном сообщении.
+- В Season 5 `/ch` считает estimated reward только для top-10 bakeries: `bakery score / top-10 score * prize pool`, затем `member score / bakery score`.
+- Season 5 rewards могут меняться до конца сезона, потому что score share постоянно меняется.
 - В solo-сезонах `/ch` считает leaderboard reward по текущему rank игрока.
 - В division-сезоне `/ch` определяет bakery division (`Standard` или `Open`) и считает leaderboard reward по актуальной payout table этой division.
-- Для `Standard activity` бот не оценивает per-player reward, потому что публичные docs не раскрывают размер activity tiers.
 - `Cook tx` считается по on-chain `Bake`-логам bakery-контракта для адреса и сезона.
 - `Gas cost` считается из этого количества `Bake`-транзакций и средней комиссии по реальным `Bake` receipts.
 - Если генерация или отправка картинки не удалась, бот автоматически делает fallback на текстовое сообщение.

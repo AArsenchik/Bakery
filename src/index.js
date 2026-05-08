@@ -75,7 +75,7 @@ const TOP_BAKERIES_FETCH_LIMIT = 100;
 const STANDARD_DIVISION_PAYOUT_LIMIT = 100;
 const OPEN_DIVISION_PAYOUT_LIMIT = 50;
 const CHECK_INDEX_BAKERY_LIMIT = 12;
-const CHECK_MEMBER_BAKERY_LIMIT = 5;
+const CHECK_MEMBER_BAKERY_LIMIT = 10;
 const CHECK_MEMBER_FETCH_LIMIT = 150;
 const CHECK_TOP_CHEF_PAGES = 3;
 const COOKIE_UNIT = 1000;
@@ -98,6 +98,10 @@ const MOSCOW_TIME_ZONE = 'Europe/Moscow';
 const PAYOUT_MODEL_LEGACY = 'legacy-top5';
 const PAYOUT_MODEL_SOLO = 'solo-leaderboard-activity';
 const PAYOUT_MODEL_DIVISIONS = 'division-standard-open';
+const PAYOUT_MODEL_GROUPED_SCORE = 'grouped-score-top10';
+const GROUPED_SCORE_PLACEMENT_BUCKET_SHARE = 1;
+const GROUPED_SCORE_QUALIFIED_BAKERIES = 10;
+const GROUPED_SCORE_DAILY_GROWTH_PERCENT = 5;
 
 const MEDALS = ['🥇', '🥈', '🥉', '🏅', '🏅'];
 const checkSessions = new Map();
@@ -194,6 +198,7 @@ function formatRank(rank) {
 
 function inferPayoutModelFromSeasonId(seasonId) {
   const normalizedSeasonId = Number(seasonId);
+  if (normalizedSeasonId >= 7) return PAYOUT_MODEL_GROUPED_SCORE;
   if (normalizedSeasonId >= 6) return PAYOUT_MODEL_DIVISIONS;
   if (normalizedSeasonId >= 5) return PAYOUT_MODEL_SOLO;
   return PAYOUT_MODEL_LEGACY;
@@ -203,15 +208,28 @@ export function detectPayoutModel(agent, season, bakeries = []) {
   const bakeryTiers = agent?.liveState?.gameplayCaps?.bakeryTiers;
   const releaseFlag = agent?.releaseFlags?.singlePlayerBakeries;
   const clanMemberCap = Number(agent?.liveState?.gameplayCaps?.clanMemberCap);
-  const hasDivisionTiers = Array.isArray(bakeryTiers) && bakeryTiers.length >= 2;
+  const marketingSeason = Number(agent?.liveState?.marketingSeason);
   const inferredPayoutModel = inferPayoutModelFromSeasonId(season?.id);
-  const hasDivisionTopBakeries = Array.isArray(bakeries)
-    && bakeries.some((bakery) => Number(bakery?.tierId) > 0 || bakery?.score !== undefined);
+  const tierNames = Array.isArray(bakeryTiers)
+    ? bakeryTiers.filter((tier) => tier?.enabled !== false).map((tier) => String(tier?.name ?? '').toLowerCase())
+    : [];
+  const hasGroupedTier = tierNames.some((name) => name.includes('grouped'));
+  const hasStandardOpenTiers = tierNames.some((name) => name.includes('standard') || name.includes('open'));
+  const hasSeason5PlacementPool = Boolean(agent?.coreMechanics?.leaderboardsAndPayouts?.season5PlacementPool);
   const hasSoloTopBakeries = Array.isArray(bakeries)
     && bakeries.length > 0
     && bakeries.every((bakery) => Number(bakery?.memberCount) === 1);
 
-  if (hasDivisionTiers || hasDivisionTopBakeries || inferredPayoutModel === PAYOUT_MODEL_DIVISIONS) {
+  if (
+    inferredPayoutModel === PAYOUT_MODEL_GROUPED_SCORE
+    || marketingSeason === 5
+    || hasSeason5PlacementPool
+    || (clanMemberCap > 1 && hasGroupedTier)
+  ) {
+    return PAYOUT_MODEL_GROUPED_SCORE;
+  }
+
+  if (inferredPayoutModel === PAYOUT_MODEL_DIVISIONS || hasStandardOpenTiers) {
     return PAYOUT_MODEL_DIVISIONS;
   }
 
@@ -228,6 +246,10 @@ function isSoloPayoutModel(payoutModel) {
 
 function isDivisionPayoutModel(payoutModel) {
   return payoutModel === PAYOUT_MODEL_DIVISIONS;
+}
+
+function isGroupedScorePayoutModel(payoutModel) {
+  return payoutModel === PAYOUT_MODEL_GROUPED_SCORE;
 }
 
 export function soloLeaderboardShareForRank(rank) {
@@ -254,12 +276,28 @@ function soloLeaderboardRewardEth(prizePoolEth, rank) {
 }
 
 function memberCookiesForPayoutModel(member, payoutModel) {
-  const fieldName = (isSoloPayoutModel(payoutModel) || isDivisionPayoutModel(payoutModel))
+  const fieldName = (isSoloPayoutModel(payoutModel) || isDivisionPayoutModel(payoutModel) || isGroupedScorePayoutModel(payoutModel))
     && member?.bakedTxCount !== undefined && member?.bakedTxCount !== null
     ? 'bakedTxCount'
     : 'txCount';
 
   return toNumber(member?.[fieldName] ?? 0, `member.${fieldName}`) / 10_000;
+}
+
+function scoreMetric(entity, label = 'score') {
+  return toNumber(
+    entity?.score
+      ?? entity?.effectiveTxCount
+      ?? entity?.bakedTxCount
+      ?? entity?.txCount
+      ?? 0,
+    label,
+  );
+}
+
+function isGroupedScoreQualifiedRank(rank) {
+  const normalizedRank = normalizeRank(rank);
+  return normalizedRank !== null && normalizedRank <= GROUPED_SCORE_QUALIFIED_BAKERIES;
 }
 
 function rankShareFromTable(rank, table) {
@@ -605,8 +643,8 @@ function deserializeCheckIndex(serialized) {
     baseUrl: serialized.baseUrl ?? env('RUGPULL_BASE_URL', DEFAULT_BASE_URL),
     bakeryContract: serialized.bakeryContract ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT),
     rpcHttp: serialized.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL),
-    payoutModel: inferredPayoutModel === PAYOUT_MODEL_DIVISIONS
-      ? PAYOUT_MODEL_DIVISIONS
+    payoutModel: [PAYOUT_MODEL_GROUPED_SCORE, PAYOUT_MODEL_DIVISIONS].includes(inferredPayoutModel)
+      ? inferredPayoutModel
       : (serialized.payoutModel ?? inferredPayoutModel),
     season: serialized.season ?? null,
     ethUsd: serialized.ethUsd ?? null,
@@ -1403,6 +1441,77 @@ export function calculateDivisionPayoutBuckets({ season, ethUsd }) {
   };
 }
 
+export function calculateGroupedScorePayout({ season, topBakeries, bakery, member, ethUsd }) {
+  const prizePoolEth = weiToEth(season.prizePool ?? season.finalizedPrizePool);
+  const seenBakeryIds = new Set();
+  const dedupedTopBakeries = [];
+  for (const item of Array.isArray(topBakeries) ? topBakeries : []) {
+    const key = item?.id === undefined || item?.id === null ? `rank:${item?.rank}:${item?.name}` : String(item.id);
+    if (seenBakeryIds.has(key)) continue;
+    seenBakeryIds.add(key);
+    dedupedTopBakeries.push(item);
+  }
+  const topTen = dedupedTopBakeries
+    .filter((item, index) => {
+      const rank = normalizeRank(item?.rank);
+      return rank === null ? index < GROUPED_SCORE_QUALIFIED_BAKERIES : rank <= GROUPED_SCORE_QUALIFIED_BAKERIES;
+    })
+    .slice(0, GROUPED_SCORE_QUALIFIED_BAKERIES);
+  const totalTopScore = topTen.reduce((sum, item) => sum + scoreMetric(item, 'topBakery.score'), 0);
+  const bakeryRank = normalizeRank(bakery?.rank);
+  const qualifies = isGroupedScoreQualifiedRank(bakeryRank);
+  const bakeryScore = scoreMetric(bakery, 'bakery.score');
+  const memberScore = scoreMetric(member, 'member.score');
+  const bakeryShare = qualifies && totalTopScore > 0 && bakeryScore > 0
+    ? bakeryScore / totalTopScore
+    : 0;
+  const memberShare = qualifies && bakeryScore > 0 && memberScore > 0
+    ? memberScore / bakeryScore
+    : 0;
+  const rewardEth = prizePoolEth * GROUPED_SCORE_PLACEMENT_BUCKET_SHARE * bakeryShare * memberShare;
+
+  return {
+    prizePoolEth,
+    placementBucketEth: prizePoolEth * GROUPED_SCORE_PLACEMENT_BUCKET_SHARE,
+    qualifiedBakeryCount: GROUPED_SCORE_QUALIFIED_BAKERIES,
+    qualifies,
+    bakeryRank,
+    bakeryScore,
+    memberScore,
+    totalTopScore,
+    bakeryShare,
+    memberShare,
+    rewardEth,
+    rewardUsd: ethUsd == null ? null : rewardEth * ethUsd,
+  };
+}
+
+export function renderGroupedScorePayoutReport({ season, ethUsd, generatedAt }) {
+  const prizePoolEth = weiToEth(season.prizePool ?? season.finalizedPrizePool);
+  const placementBucketEth = prizePoolEth * GROUPED_SCORE_PLACEMENT_BUCKET_SHARE;
+  const lines = ['<b>Current Season Payouts</b>', ''];
+
+  lines.push(`Prize pool: ${formatEth(prizePoolEth, 4)} ETH`);
+  lines.push(`Placement pool (100%): ${formatEth(placementBucketEth, 4)} ETH`);
+  lines.push('');
+  lines.push('<b>Season 5 payout</b>');
+  lines.push(`Top ${GROUPED_SCORE_QUALIFIED_BAKERIES} bakeries qualify by final score.`);
+  lines.push('Bakery payout = bakery score / top-10 total score * prize pool.');
+  lines.push('Member payout = member score / bakery score * bakery payout.');
+  lines.push('');
+  lines.push('<b>Score</b>');
+  lines.push(`Score is cookie-based and grows +${GROUPED_SCORE_DAILY_GROWTH_PERCENT}% per season day: D0 1.00x, D1 1.05x, D7 1.35x.`);
+  lines.push('Rewards can change until the season ends because the score share keeps moving.');
+  lines.push('');
+  lines.push('<b>Grouped bakeries</b>');
+  lines.push('Bakery cap: 50 members. Baking cadence: 1 bake per baker every 5 blocks.');
+  lines.push('Shared upgrades are active this season and can permanently improve bakery-wide gameplay.');
+  if (ethUsd) lines.push(`ETH/USD: $${formatNumber(ethUsd, 2)}`);
+  lines.push(`Updated: ${formatMoscowDateTime(generatedAt)}`);
+
+  return lines.join('\n').trim();
+}
+
 export function renderValueReport({ values, season, ethUsd, generatedAt }) {
   const lines = ['<b>Value of 1,000 cookies:</b>', ''];
 
@@ -1536,6 +1645,7 @@ function memberFromChef(chef, seasonId, rank = null) {
     rank,
     txCount: chef.txCount,
     bakedTxCount: chef.bakedTxCount,
+    score: chef.score,
     effectiveTxCount: chef.effectiveTxCount,
     referralCount: chef.referralCount ?? 0,
     boostAttempts: chef.boostAttempts ?? 0,
@@ -1555,6 +1665,7 @@ function mergeMember(existing, next) {
     rank: next.rank ?? existing.rank,
     txCount: next.txCount ?? existing.txCount,
     bakedTxCount: next.bakedTxCount ?? existing.bakedTxCount,
+    score: next.score ?? existing.score,
     effectiveTxCount: next.effectiveTxCount ?? existing.effectiveTxCount,
     registeredAt: next.registeredAt ?? existing.registeredAt,
   };
@@ -1614,7 +1725,7 @@ async function buildCheckIndex() {
     ),
     prefetchTopChefSlice(baseUrl, seasonId).catch(() => []),
   ]);
-  const bakeryValues = (isSoloPayoutModel(payoutModel) || isDivisionPayoutModel(payoutModel))
+  const bakeryValues = (isSoloPayoutModel(payoutModel) || isDivisionPayoutModel(payoutModel) || isGroupedScorePayoutModel(payoutModel))
     ? []
     : calculateCookieValues({
         agent,
@@ -1696,7 +1807,7 @@ async function buildMinimalCheckIndex() {
         fetchTopBakeries(baseUrl, season.id, OPEN_DIVISION_PAYOUT_LIMIT, DIVISION_OPEN_TIER_ID).catch(() => []),
       ])
     : [[], []];
-  const bakeryValues = (isSoloPayoutModel(payoutModel) || isDivisionPayoutModel(payoutModel))
+  const bakeryValues = (isSoloPayoutModel(payoutModel) || isDivisionPayoutModel(payoutModel) || isGroupedScorePayoutModel(payoutModel))
     ? []
     : calculateCookieValues({
         agent,
@@ -2095,8 +2206,32 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
   }
 }
 
-function estimateRewardForMember({ member, bakery, bakeryValue, season, payoutModel, ethUsd }) {
+function estimateRewardForMember({ member, bakery, topBakeries = [], bakeryValue, season, payoutModel, ethUsd }) {
   const cookies = memberCookiesForPayoutModel(member, payoutModel);
+
+  if (isGroupedScorePayoutModel(payoutModel)) {
+    const payout = calculateGroupedScorePayout({
+      season,
+      topBakeries,
+      bakery,
+      member,
+      ethUsd,
+    });
+
+    return {
+      cookies,
+      rewardEth: payout.rewardEth,
+      rewardUsd: payout.rewardUsd,
+      rank: payout.bakeryRank,
+      leaderboardShare: payout.bakeryShare,
+      memberScoreShare: payout.memberShare,
+      bakeryScore: payout.bakeryScore,
+      memberScore: payout.memberScore,
+      totalTopScore: payout.totalTopScore,
+      isTopBakery: payout.qualifies,
+      rewardMode: 'grouped-score-top10',
+    };
+  }
 
   if (isDivisionPayoutModel(payoutModel)) {
     const tierId = Number(bakery?.tierId ?? member?.tierId ?? 0);
@@ -2184,6 +2319,7 @@ export function renderCheckReport({
   ethUsd,
   rank,
   leaderboardShare,
+  memberScoreShare = 0,
   divisionTierId,
   divisionName,
   hasActivityBucket,
@@ -2192,6 +2328,7 @@ export function renderCheckReport({
   const cookies = memberCookiesForPayoutModel(member, payoutModel);
   const isSolo = isSoloPayoutModel(payoutModel);
   const isDivision = isDivisionPayoutModel(payoutModel);
+  const isGroupedScore = isGroupedScorePayoutModel(payoutModel);
   const lines = ['<b>Season Check</b>', ''];
   const gasCostText = gasSpentEth === null
     ? '<b>N/A</b>'
@@ -2204,15 +2341,16 @@ export function renderCheckReport({
   const rewardLabel = isDivision
     ? `${divisionName} leaderboard reward`
     : (isSolo ? 'Leaderboard reward' : 'Est. reward');
+  const groupedTopText = isGroupedScore && isGroupedScoreQualifiedRank(rank) ? ' (top 10)' : '';
 
   lines.push(`<b>${escapeHtml(name)}</b>`);
   lines.push(`${escapeHtml(shortAddress(address))}`);
-  lines.push(`Clan: <b>${escapeHtml(bakery.name)}</b>${divisionText}${!isSolo && !isDivision && bakeryValue ? ' (top 5)' : ''}`);
+  lines.push(`Clan: <b>${escapeHtml(bakery.name)}</b>${divisionText}${groupedTopText}${!isSolo && !isDivision && !isGroupedScore && bakeryValue ? ' (top 5)' : ''}`);
   lines.push('');
   lines.push(`Cookies: <b>${compactCookies(cookies)}</b>`);
   lines.push(`Cook tx: <b>${txCount === null ? 'n/a' : formatNumber(txCount, 0)}</b>`);
   lines.push(`Gas cost: ${gasCostText}`);
-  if (isDivision || isSolo) {
+  if (isGroupedScore || isDivision || isSolo) {
     lines.push(`Rank: <b>${escapeHtml(formatRank(rank))}</b>`);
     lines.push(`${rewardLabel}: ${rewardText}`);
   } else {
@@ -2222,7 +2360,7 @@ export function renderCheckReport({
   if (gasSpentEth === null) {
     lines.push(`${roiLabel}: <b>N/A</b>`);
   } else if (roiPercent === null) {
-    lines.push(`${roiLabel}: <b>${netEth >= 0 ? '+' : ''}${formatEth(netEth, 4)} ETH</b>${netUsd === null ? '' : ` ($${netUsd >= 0 ? '+' : ''}$${formatNumber(Math.abs(netUsd), 0)})`}`);
+    lines.push(`${roiLabel}: <b>${netEth >= 0 ? '+' : ''}${formatEth(netEth, 4)} ETH</b>${netUsd === null ? '' : ` (${netUsd >= 0 ? '+' : '-'}$${formatNumber(Math.abs(netUsd), 0)})`}`);
   } else {
     lines.push(`${roiLabel}: <b>${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%</b>${netUsd === null ? '' : ` (${netUsd >= 0 ? '+' : '-'}$${formatNumber(Math.abs(netUsd), 0)})`}`);
   }
@@ -2230,7 +2368,17 @@ export function renderCheckReport({
   lines.push('');
   if (seasonStartTime) lines.push(`Season started: ${formatMoscowDateTime(new Date(seasonStartTime * 1000))}`);
   lines.push(`Prize pool: ${formatEth(weiToEth(season.prizePool ?? season.finalizedPrizePool), 4)} ETH`);
-  if (isDivision) {
+  if (isGroupedScore) {
+    const shareText = leaderboardShare > 0 ? formatPercent(leaderboardShare * 100, 3) : '0%';
+    const memberShareText = memberScoreShare > 0 ? formatPercent(memberScoreShare * 100, 3) : '0%';
+    if (isGroupedScoreQualifiedRank(rank)) {
+      lines.push(`Bakery score share: ${shareText} of the 100% top-10 placement pool`);
+      lines.push(`Member score share: ${memberShareText} of bakery score`);
+    } else {
+      lines.push(`Bakery payout: outside top ${GROUPED_SCORE_QUALIFIED_BAKERIES} right now`);
+    }
+    lines.push('S5 payout is score-weighted and can change until the season ends.');
+  } else if (isDivision) {
     const shareText = leaderboardShare > 0 ? formatPercent(leaderboardShare * 100, 3) : '0%';
     lines.push(`${divisionName} leaderboard share: ${shareText} of the ${formatPercent(divisionBucketShareForTier(divisionTierId) * 100, 0)} ${divisionName.toLowerCase()} leaderboard bucket`);
     if (hasActivityBucket) {
@@ -2270,6 +2418,8 @@ function buildCheckCardData({
   ethUsd,
   rank,
   leaderboardShare,
+  memberScoreShare = 0,
+  totalTopScore = 0,
   divisionTierId,
   divisionName,
   hasActivityBucket,
@@ -2278,6 +2428,7 @@ function buildCheckCardData({
   const cookies = memberCookiesForPayoutModel(member, payoutModel);
   const isSolo = isSoloPayoutModel(payoutModel);
   const isDivision = isDivisionPayoutModel(payoutModel);
+  const isGroupedScore = isGroupedScorePayoutModel(payoutModel);
   const gasUnavailable = gasSpentEth === null;
   const roiValue = gasUnavailable || roiPercent === null ? 'N/A' : `${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%`;
   const netUsdValue = gasUnavailable || netUsd === null ? null : `${netUsd >= 0 ? '+' : '-'}${formatUsdCompact(netUsd, 0)}`;
@@ -2285,25 +2436,32 @@ function buildCheckCardData({
   const rewardUsdValue = rewardUsd === null ? null : formatUsdCompact(rewardUsd, 0);
   const oneKValue = bakeryValue ? `${formatEth(bakeryValue.ethPerThousandCookies, 6)} ETH` : 'OUTSIDE TOP 5';
   const rankValue = formatRank(rank);
-  const rankSubvalue = isDivision
+  const rankSubvalue = isGroupedScore
+    ? (isGroupedScoreQualifiedRank(rank)
+        ? (totalTopScore > 0 && leaderboardShare > 0
+            ? `TOP 10 SCORE ${formatPercent(leaderboardShare * 100, 3)}`
+            : 'TOP 10 SCORE PENDING')
+        : `OUTSIDE TOP ${GROUPED_SCORE_QUALIFIED_BAKERIES}`)
+    : (isDivision
     ? (leaderboardShare > 0
         ? `${divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD' : 'OPEN'} SHARE ${formatPercent(leaderboardShare * 100, 3)}`
         : (hasActivityBucket ? 'STD ACTIVITY 35%' : 'OPEN OUTSIDE TOP 50'))
     : (leaderboardShare > 0
         ? `LB SHARE ${formatPercent(leaderboardShare * 100, 3)}`
-        : 'ACTIVITY 30% SEPARATE');
+        : 'ACTIVITY 30% SEPARATE'));
   const rewardTileLabel = isDivision
     ? (divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD LB reward' : 'OPEN reward')
     : (isSolo ? 'LB reward' : 'Est reward');
   const roiTileLabel = isDivision
     ? (divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD LB ROI' : 'OPEN ROI')
     : (isSolo ? 'LB ROI' : 'Net ROI');
+  const groupedTopText = isGroupedScore && isGroupedScoreQualifiedRank(rank) ? ' (top 10)' : '';
 
   return {
     title: 'Season Check',
     name,
     address: shortAddress(address),
-    clan: `Clan: ${bakery.name}${isDivision ? ` (${divisionName})` : (!isSolo && bakeryValue ? ' (top 5)' : '')}`,
+    clan: `Clan: ${bakery.name}${isDivision ? ` (${divisionName})` : (groupedTopText || (!isSolo && !isGroupedScore && bakeryValue ? ' (top 5)' : ''))}`,
     avatarUrl: profile?.profilePictureUrl ?? null,
     tiles: [
       {
@@ -2342,7 +2500,7 @@ function buildCheckCardData({
         valueColor: roiPercent !== null && roiPercent >= 0 ? '#b9ffd0' : '#ffb4a5',
         subvalueColor: roiPercent !== null && roiPercent >= 0 ? '#dbffe7' : '#ffd7cb',
       },
-      (isSolo || isDivision)
+      (isSolo || isDivision || isGroupedScore)
         ? {
             label: 'Rank',
             value: rankValue,
@@ -2385,6 +2543,7 @@ export async function buildCheckReport(identity) {
         rank: chef.rank ?? null,
         txCount: chef.txCount,
         bakedTxCount: chef.bakedTxCount,
+        score: chef.score,
         effectiveTxCount: chef.effectiveTxCount,
         referralCount: chef.referralCount ?? 0,
         boostAttempts: chef.boostAttempts ?? 0,
@@ -2436,7 +2595,7 @@ export async function buildCheckReport(identity) {
     }),
   ]);
 
-  const bakeryValue = isDivisionPayoutModel(index.payoutModel)
+  const bakeryValue = (isDivisionPayoutModel(index.payoutModel) || isGroupedScorePayoutModel(index.payoutModel))
     ? null
     : (index.bakeryValueMap.get(bakery.name) ?? null);
   let profile = index.profileMap.get(address) ?? null;
@@ -2458,7 +2617,42 @@ export async function buildCheckReport(identity) {
   let divisionTierId = Number(resolvedBakery?.tierId ?? 0);
   let divisionName = divisionNameFromTierId(divisionTierId);
 
-  if (isDivisionPayoutModel(index.payoutModel)) {
+  if (isGroupedScorePayoutModel(index.payoutModel)) {
+    let bakeryRank = normalizeRank(resolvedBakery?.rank);
+
+    if (bakeryRank === null || resolvedBakery?.score === undefined) {
+      const refreshedBakery = await fetchBakeryById(index.baseUrl, member.bakeryId, index.season.id).catch(() => null);
+      if (refreshedBakery) {
+        resolvedBakery = {
+          ...resolvedBakery,
+          ...refreshedBakery,
+        };
+        index.bakeryMap.set(resolvedBakery.id, resolvedBakery);
+        saveCheckIndexCache(index).catch(() => {});
+        bakeryRank = normalizeRank(resolvedBakery?.rank);
+      }
+    }
+
+    if (bakeryRank === null) {
+      const rankedBakery = await findBakeryByIdOnLeaderboard(
+        index.baseUrl,
+        index.season.id,
+        member.bakeryId,
+      ).catch(() => null);
+
+      if (rankedBakery) {
+        resolvedBakery = {
+          ...resolvedBakery,
+          ...rankedBakery,
+        };
+        index.bakeryMap.set(resolvedBakery.id, resolvedBakery);
+        saveCheckIndexCache(index).catch(() => {});
+        bakeryRank = normalizeRank(rankedBakery.rank);
+      }
+    }
+
+    memberRank = bakeryRank;
+  } else if (isDivisionPayoutModel(index.payoutModel)) {
     let divisionRank = normalizeRank(resolvedBakery?.rank);
 
     if (divisionTierId <= 0 || divisionRank === null) {
@@ -2513,6 +2707,7 @@ export async function buildCheckReport(identity) {
       rank: memberRank ?? resolvedBakery?.rank ?? null,
       tierId: divisionTierId > 0 ? divisionTierId : (resolvedBakery?.tierId ?? null),
     },
+    topBakeries: [resolvedBakery, ...index.bakeryMap.values()],
     bakeryValue,
     season: index.season,
     payoutModel: index.payoutModel,
@@ -2551,6 +2746,8 @@ export async function buildCheckReport(identity) {
       ethUsd: index.ethUsd,
       rank: reward.rank ?? memberRank,
       leaderboardShare: reward.leaderboardShare ?? 0,
+      memberScoreShare: reward.memberScoreShare ?? 0,
+      totalTopScore: reward.totalTopScore ?? 0,
       divisionTierId: reward.divisionTierId ?? divisionTierId,
       divisionName: reward.divisionName ?? divisionName,
       hasActivityBucket: reward.hasActivityBucket ?? false,
@@ -2576,6 +2773,7 @@ export async function buildCheckReport(identity) {
       ethUsd: index.ethUsd,
       rank: reward.rank ?? memberRank,
       leaderboardShare: reward.leaderboardShare ?? 0,
+      memberScoreShare: reward.memberScoreShare ?? 0,
       divisionTierId: reward.divisionTierId ?? divisionTierId,
       divisionName: reward.divisionName ?? divisionName,
       hasActivityBucket: reward.hasActivityBucket ?? false,
@@ -2602,6 +2800,10 @@ async function buildReport() {
   });
   const ethUsd = await fetchEthUsd();
   const payoutModel = detectPayoutModel(agent, season, bakeries);
+
+  if (isGroupedScorePayoutModel(payoutModel)) {
+    return renderGroupedScorePayoutReport({ season, ethUsd, generatedAt: new Date() });
+  }
 
   if (isDivisionPayoutModel(payoutModel)) {
     return renderDivisionPayoutReport({ season, ethUsd, generatedAt: new Date() });
@@ -2861,10 +3063,10 @@ async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
     group
       ? 'Reply to this message with the Rugpull Bakery username or the wallet address in the <code>0x...</code> format.'
       : 'Send the Rugpull Bakery username or the wallet address in the <code>0x...</code> format.',
-    'I will show profit/loss.',
+    'I will show the estimated reward and profit/loss.',
     '',
-    'Open: leaderboard reward is included.',
-    'Standard: leaderboard reward is included, activity reward is separate.',
+    'Season 5: top 10 bakeries split 100% of the prize pool by bakery score.',
+    'Inside a qualified bakery, reward is split by each member score contribution.',
   ];
   const promptText = promptLines.join('\n');
   const promptMessage = await sendMessage(chatId, promptText, {
