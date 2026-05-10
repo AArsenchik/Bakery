@@ -466,6 +466,8 @@ test('renders a grouped score season check report', () => {
   });
 
   assert.match(report, /Clan: <b>ZolotoGang<\/b> \(top 10\)/);
+  assert.match(report, /Score: <b>15K<\/b>/);
+  assert.match(report, /Cookies baked: <b>88.2K<\/b>/);
   assert.match(report, /Rank: <b>#6<\/b>/);
   assert.match(report, /Est\. reward:/);
   assert.match(report, /Bakery score share: 60% of the 100% top-10 placement pool/);

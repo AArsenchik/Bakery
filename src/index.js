@@ -295,6 +295,10 @@ function scoreMetric(entity, label = 'score') {
   );
 }
 
+function scoreForDisplay(entity) {
+  return scoreMetric(entity, 'score') / 10_000;
+}
+
 function isGroupedScoreQualifiedRank(rank) {
   const normalizedRank = normalizeRank(rank);
   return normalizedRank !== null && normalizedRank <= GROUPED_SCORE_QUALIFIED_BAKERIES;
@@ -2370,6 +2374,7 @@ export function renderCheckReport({
   const isSolo = isSoloPayoutModel(payoutModel);
   const isDivision = isDivisionPayoutModel(payoutModel);
   const isGroupedScore = isGroupedScorePayoutModel(payoutModel);
+  const score = scoreForDisplay(member);
   const lines = ['<b>Season Check</b>', ''];
   const gasCostText = gasSpentEth === null
     ? '<b>N/A</b>'
@@ -2388,7 +2393,12 @@ export function renderCheckReport({
   lines.push(`${escapeHtml(shortAddress(address))}`);
   lines.push(`Clan: <b>${escapeHtml(bakery.name)}</b>${divisionText}${groupedTopText}${!isSolo && !isDivision && !isGroupedScore && bakeryValue ? ' (top 5)' : ''}`);
   lines.push('');
-  lines.push(`Cookies: <b>${compactCookies(cookies)}</b>`);
+  if (isGroupedScore) {
+    lines.push(`Score: <b>${compactCookies(score)}</b>`);
+    lines.push(`Cookies baked: <b>${compactCookies(cookies)}</b>`);
+  } else {
+    lines.push(`Cookies: <b>${compactCookies(cookies)}</b>`);
+  }
   lines.push(`Cook tx: <b>${txCount === null ? 'n/a' : formatNumber(txCount, 0)}</b>`);
   lines.push(`Gas cost: ${gasCostText}`);
   if (isGroupedScore || isDivision || isSolo) {
@@ -2470,6 +2480,7 @@ function buildCheckCardData({
   const isSolo = isSoloPayoutModel(payoutModel);
   const isDivision = isDivisionPayoutModel(payoutModel);
   const isGroupedScore = isGroupedScorePayoutModel(payoutModel);
+  const score = scoreForDisplay(member);
   const gasUnavailable = gasSpentEth === null;
   const roiValue = gasUnavailable || roiPercent === null ? 'N/A' : `${roiPercent >= 0 ? '+' : ''}${formatNumber(roiPercent, 1)}%`;
   const netUsdValue = gasUnavailable || netUsd === null ? null : `${netUsd >= 0 ? '+' : '-'}${formatUsdCompact(netUsd, 0)}`;
@@ -2506,10 +2517,12 @@ function buildCheckCardData({
     avatarUrl: profile?.profilePictureUrl ?? null,
     tiles: [
       {
-        label: 'Cookies',
-        value: compactCookies(cookies),
+        label: isGroupedScore ? 'Score' : 'Cookies',
+        value: isGroupedScore ? compactCookies(score) : compactCookies(cookies),
+        subvalue: isGroupedScore ? `Cookies ${compactCookies(cookies)}` : null,
         accent: '#43e7c6',
         valueColor: '#f5f4d7',
+        subvalueColor: '#d5f8ee',
       },
       {
         label: 'Cook tx',
