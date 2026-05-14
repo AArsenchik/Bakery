@@ -12,6 +12,7 @@ import {
   deriveApproxBakeTxStats,
   gasSpentEthFromTxStats,
   isCheckCommand,
+  isCheckIndexFresh,
   isHiddenStatsCommand,
   isHelpCommand,
   isValueCommand,
@@ -215,6 +216,13 @@ test('processes the same update id only once', () => {
   const update = { update_id: 12345, message: { chat: { id: 1 }, from: { id: 2 } } };
   assert.equal(shouldProcessUpdate(update), true);
   assert.equal(shouldProcessUpdate(update), false);
+});
+
+test('treats stale check indexes as not fresh', () => {
+  const now = Date.now();
+  assert.equal(isCheckIndexFresh({ generatedAtMs: now - 1_000 }, now), true);
+  assert.equal(isCheckIndexFresh({ generatedAtMs: now - 31_000 }, now), false);
+  assert.equal(isCheckIndexFresh(null, now), false);
 });
 
 test('schedules different conversations in parallel while preserving same-conversation order', async () => {

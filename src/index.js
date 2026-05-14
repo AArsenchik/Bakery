@@ -600,6 +600,10 @@ function isCacheUsable(cache) {
   return cacheAgeMs(cache) <= CACHE_STALE_MS;
 }
 
+export function isCheckIndexFresh(index, now = Date.now()) {
+  return Boolean(index) && now - index.generatedAtMs <= CHECK_INDEX_TTL_MS;
+}
+
 async function readCacheFile(cacheFile) {
   try {
     return JSON.parse(await readFile(cacheFile, 'utf8'));
@@ -1858,13 +1862,17 @@ function refreshCheckIndex() {
 }
 
 async function getCheckIndex() {
-  if (checkIndexCache && Date.now() - checkIndexCache.generatedAtMs <= CHECK_INDEX_TTL_MS) {
+  if (isCheckIndexFresh(checkIndexCache)) {
     return checkIndexCache;
   }
 
   if (checkIndexCache) {
-    refreshCheckIndex();
-    return checkIndexCache;
+    try {
+      return await refreshCheckIndex();
+    } catch (error) {
+      console.warn(`Could not refresh stale /ch index, using the latest cached index: ${error.message}`);
+      return checkIndexCache;
+    }
   }
 
   try {
@@ -1879,7 +1887,7 @@ async function getCheckIndex() {
 }
 
 function refreshCheckIndexInBackground(force = false) {
-  if (!force && checkIndexCache && Date.now() - checkIndexCache.generatedAtMs <= CHECK_INDEX_TTL_MS) {
+  if (!force && isCheckIndexFresh(checkIndexCache)) {
     return;
   }
 
