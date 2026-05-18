@@ -204,26 +204,45 @@ function inferPayoutModelFromSeasonId(seasonId) {
   return PAYOUT_MODEL_LEGACY;
 }
 
+function getScoreSharePlacementPool(agent) {
+  return agent?.coreMechanics?.leaderboardsAndPayouts?.scoreSharePlacementPool
+    ?? agent?.coreMechanics?.leaderboardsAndPayouts?.season5PlacementPool
+    ?? null;
+}
+
+function getMarketingSeason(agent, season) {
+  const liveMarketingSeason = Number(agent?.liveState?.marketingSeason);
+  if (Number.isFinite(liveMarketingSeason) && liveMarketingSeason > 0) return liveMarketingSeason;
+
+  const poolMarketingSeason = Number(getScoreSharePlacementPool(agent)?.marketingSeason);
+  if (Number.isFinite(poolMarketingSeason) && poolMarketingSeason > 0) return poolMarketingSeason;
+
+  const normalizedSeasonId = Number(season?.id);
+  if (normalizedSeasonId >= 8) return 6;
+  if (normalizedSeasonId >= 7) return 5;
+  return null;
+}
+
 export function detectPayoutModel(agent, season, bakeries = []) {
   const bakeryTiers = agent?.liveState?.gameplayCaps?.bakeryTiers;
   const releaseFlag = agent?.releaseFlags?.singlePlayerBakeries;
   const clanMemberCap = Number(agent?.liveState?.gameplayCaps?.clanMemberCap);
-  const marketingSeason = Number(agent?.liveState?.marketingSeason);
+  const marketingSeason = getMarketingSeason(agent, season);
   const inferredPayoutModel = inferPayoutModelFromSeasonId(season?.id);
   const tierNames = Array.isArray(bakeryTiers)
     ? bakeryTiers.filter((tier) => tier?.enabled !== false).map((tier) => String(tier?.name ?? '').toLowerCase())
     : [];
   const hasGroupedTier = tierNames.some((name) => name.includes('grouped'));
   const hasStandardOpenTiers = tierNames.some((name) => name.includes('standard') || name.includes('open'));
-  const hasSeason5PlacementPool = Boolean(agent?.coreMechanics?.leaderboardsAndPayouts?.season5PlacementPool);
+  const hasScoreSharePlacementPool = Boolean(getScoreSharePlacementPool(agent));
   const hasSoloTopBakeries = Array.isArray(bakeries)
     && bakeries.length > 0
     && bakeries.every((bakery) => Number(bakery?.memberCount) === 1);
 
   if (
     inferredPayoutModel === PAYOUT_MODEL_GROUPED_SCORE
-    || marketingSeason === 5
-    || hasSeason5PlacementPool
+    || marketingSeason >= 5
+    || hasScoreSharePlacementPool
     || (clanMemberCap > 1 && hasGroupedTier)
   ) {
     return PAYOUT_MODEL_GROUPED_SCORE;
@@ -1498,15 +1517,51 @@ export function calculateGroupedScorePayout({ season, topBakeries, bakery, membe
   };
 }
 
-export function renderGroupedScorePayoutReport({ season, ethUsd, generatedAt }) {
+export function renderGroupedScorePayoutReport({ agent = null, season, ethUsd, generatedAt }) {
   const prizePoolEth = weiToEth(season.prizePool ?? season.finalizedPrizePool);
   const placementBucketEth = prizePoolEth * GROUPED_SCORE_PLACEMENT_BUCKET_SHARE;
+  const marketingSeason = getMarketingSeason(agent, season);
+  const seasonLabel = marketingSeason ? `Season ${marketingSeason}` : 'Current season';
+  const bakeryTiers = Array.isArray(agent?.liveState?.gameplayCaps?.bakeryTiers)
+    ? agent.liveState.gameplayCaps.bakeryTiers.filter((tier) => tier?.enabled !== false)
+    : [];
+  const groupedTier = bakeryTiers.find((tier) => String(tier?.name ?? '').toLowerCase().includes('grouped'));
+  const openTier = bakeryTiers.find((tier) => String(tier?.name ?? '').toLowerCase().includes('open'));
+  const season6Docs = agent?.coreMechanics?.bakeryCreation?.season6Docs;
+  const groupedMemberCap = Number(season6Docs?.memberCap ?? agent?.liveState?.gameplayCaps?.clanMemberCap) || 50;
+  const groupedCooldownBlocks = Number(groupedTier?.bakeCooldownBlocks ?? season6Docs?.bakeCooldownBlocks ?? 5) || 5;
+  const openCooldownBlocks = Number(openTier?.bakeCooldownBlocks ?? 1) || 1;
+  const liveRandomEvents = Array.isArray(agent?.coreMechanics?.randomEvents?.eventPool)
+    ? agent.coreMechanics.randomEvents.eventPool
+    : [];
+  const randomEvents = liveRandomEvents.length > 0
+    ? liveRandomEvents
+    : (marketingSeason >= 6
+      ? [
+          { name: 'Rush Order', multiplierBps: 11000, durationSeconds: 3600 },
+          { name: 'Golden Batch', multiplierBps: 12000, durationSeconds: 2700 },
+          { name: 'Oven Frenzy', multiplierBps: 13500, durationSeconds: 1800 },
+        ]
+      : []);
+  const liveUpgradeDefinitions = Array.isArray(agent?.coreMechanics?.bakeryUpgrades?.upgradeDefinitions)
+    ? agent.coreMechanics.bakeryUpgrades.upgradeDefinitions
+    : [];
+  const upgradeDefinitions = liveUpgradeDefinitions.length > 0
+    ? liveUpgradeDefinitions
+    : (marketingSeason >= 6
+      ? [
+          { name: 'Upgraded Oven' },
+          { name: 'Propaganda Office' },
+          { name: 'Robotic Cleaners' },
+          { name: 'Sabotage Workshop' },
+        ]
+      : []);
   const lines = ['<b>Current Season Payouts</b>', ''];
 
   lines.push(`Prize pool: ${formatEth(prizePoolEth, 4)} ETH`);
   lines.push(`Placement pool (100%): ${formatEth(placementBucketEth, 4)} ETH`);
   lines.push('');
-  lines.push('<b>Season 5 payout</b>');
+  lines.push(`<b>${seasonLabel} payout</b>`);
   lines.push(`Top ${GROUPED_SCORE_QUALIFIED_BAKERIES} bakeries qualify by final score.`);
   lines.push('Bakery payout = bakery score / top-10 total score * prize pool.');
   lines.push('Member payout = member score / bakery score * bakery payout.');
@@ -1515,9 +1570,38 @@ export function renderGroupedScorePayoutReport({ season, ethUsd, generatedAt }) 
   lines.push(`Score is cookie-based and grows +${GROUPED_SCORE_DAILY_GROWTH_PERCENT}% per season day: D0 1.00x, D1 1.05x, D7 1.35x.`);
   lines.push('Rewards can change until the season ends because the score share keeps moving.');
   lines.push('');
-  lines.push('<b>Grouped bakeries</b>');
-  lines.push('Bakery cap: 50 members. Baking cadence: 1 bake per baker every 5 blocks.');
-  lines.push('Shared upgrades are active this season and can permanently improve bakery-wide gameplay.');
+  if (marketingSeason >= 6) {
+    lines.push('<b>Season 6 bakeries</b>');
+    lines.push(`Grouped: ${groupedMemberCap} members, 1 bake per baker every ${groupedCooldownBlocks} blocks.`);
+    lines.push(`Open: solo bakery, 1 bake per baker every ${openCooldownBlocks} block${openCooldownBlocks === 1 ? '' : 's'}.`);
+    lines.push('The payout leaderboard is global score-share top 10, not fixed-rank percentages.');
+    lines.push('');
+    lines.push('<b>Auto-bake, upgrades, events</b>');
+    lines.push('Auto-bake can create future score, but /ch only reads live public score and exact on-chain bake fees.');
+    if (upgradeDefinitions.length > 0) {
+      const upgradeNames = upgradeDefinitions.map((upgrade) => upgrade?.name).filter(Boolean).join(', ');
+      if (upgradeNames) lines.push(`Upgrade paths: ${upgradeNames}.`);
+      lines.push('Passive action progress and active cookie contributions unlock separately.');
+    }
+    if (randomEvents.length > 0) {
+      const eventText = randomEvents.map((event) => {
+        const multiplierBps = Number(event?.multiplierBps);
+        const boostPercent = Number.isFinite(multiplierBps)
+          ? `+${formatNumber((multiplierBps - 10000) / 100, 0)}%`
+          : 'temporary boost';
+        const durationMinutes = Number(event?.durationSeconds) / 60;
+        const durationText = Number.isFinite(durationMinutes) && durationMinutes > 0
+          ? `${formatNumber(durationMinutes, 0)}m`
+          : 'limited time';
+        return `${event?.name ?? 'Event'} ${boostPercent}/${durationText}`;
+      }).join('; ');
+      lines.push(`Random events: ${eventText}.`);
+    }
+  } else {
+    lines.push('<b>Grouped bakeries</b>');
+    lines.push('Bakery cap: 50 members. Baking cadence: 1 bake per baker every 5 blocks.');
+    lines.push('Shared upgrades are active this season and can permanently improve bakery-wide gameplay.');
+  }
   if (ethUsd) lines.push(`ETH/USD: $${formatNumber(ethUsd, 2)}`);
   lines.push(`Updated: ${formatMoscowDateTime(generatedAt)}`);
 
@@ -2436,7 +2520,7 @@ export function renderCheckReport({
     } else {
       lines.push(`Bakery payout: outside top ${GROUPED_SCORE_QUALIFIED_BAKERIES} right now`);
     }
-    lines.push('S5 payout is score-weighted and can change until the season ends.');
+    lines.push('Score-share payout can change until the season ends.');
   } else if (isDivision) {
     const shareText = leaderboardShare > 0 ? formatPercent(leaderboardShare * 100, 3) : '0%';
     lines.push(`${divisionName} leaderboard share: ${shareText} of the ${formatPercent(divisionBucketShareForTier(divisionTierId) * 100, 0)} ${divisionName.toLowerCase()} leaderboard bucket`);
@@ -2861,7 +2945,7 @@ async function buildReport() {
   const payoutModel = detectPayoutModel(agent, season, bakeries);
 
   if (isGroupedScorePayoutModel(payoutModel)) {
-    return renderGroupedScorePayoutReport({ season, ethUsd, generatedAt: new Date() });
+    return renderGroupedScorePayoutReport({ agent, season, ethUsd, generatedAt: new Date() });
   }
 
   if (isDivisionPayoutModel(payoutModel)) {
@@ -3125,8 +3209,9 @@ async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
       : 'Send the Rugpull Bakery username or the wallet address in the <code>0x...</code> format.',
     'I will show the estimated reward and profit/loss.',
     '',
-    'Season 5: top 10 bakeries split 100% of the prize pool by bakery score.',
+    'Current season: top 10 bakeries split 100% of the prize pool by bakery score.',
     'Inside a qualified bakery, reward is split by each member score contribution.',
+    'Costs use exact on-chain bake fees when available.',
   ];
   const promptText = promptLines.join('\n');
   const promptMessage = await sendMessage(chatId, promptText, {

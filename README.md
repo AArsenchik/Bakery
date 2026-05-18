@@ -9,7 +9,8 @@
 3. Для legacy-сезонов с payout по bakery balance бот считает стоимость `1,000` cookies по текущему распределению.
 4. Для solo-сезонов бот показывает breakdown leaderboard/activity payout по текущему пулу.
 5. Для division-сезона бот показывает bucket'ы `Standard leaderboard / Standard activity / Open leaderboard` и считает `/ch` по division-specific payout table.
-6. Для Season 5 бот использует grouped score модель: топ-10 bakeries делят 100% prize pool по доле bakery score, а внутри bakery reward делится по доле member score contribution.
+6. Для Season 5/6 бот использует score-share модель: топ-10 bakeries делят 100% prize pool по доле bakery score, а внутри bakery reward делится по доле member score contribution.
+7. Для Season 6 бот учитывает live `agent.json`: Grouped/Open bakery tiers, 50-member grouped bakeries, 5-block grouped bake cooldown, Open 1-block cadence, shared upgrades and random events.
 
 ## Запуск
 
@@ -55,8 +56,10 @@ npm start
 - `/ch` сейчас считает по активному сезону.
 - В группах бот ждет ответ только от того пользователя, который вызвал `/ch`, и безопаснее всего отвечать reply на prompt бота.
 - Можно сразу отправить `/ch username` или `/ch 0x...` в одном сообщении.
-- В Season 5 `/ch` считает estimated reward только для top-10 bakeries: `bakery score / top-10 score * prize pool`, затем `member score / bakery score`.
-- Season 5 rewards могут меняться до конца сезона, потому что score share постоянно меняется.
+- В Season 5/6 `/ch` считает estimated reward только для top-10 bakeries: `bakery score / top-10 score * prize pool`, затем `member score / bakery score`.
+- Season 6 использует score как reward metric, не raw cookies: score растет от cookies baked с daily scaler `+5%` за день сезона.
+- Season 6 rewards могут меняться до конца сезона, потому что score share постоянно меняется.
+- Auto-bake, upgrades, boosts/rugs и random events могут менять будущий score; бот не запускает действия, а только читает live public stats и on-chain fees.
 - В solo-сезонах `/ch` считает leaderboard reward по текущему rank игрока.
 - В division-сезоне `/ch` определяет bakery division (`Standard` или `Open`) и считает leaderboard reward по актуальной payout table этой division.
 - `Cook tx` считается по on-chain `Bake`-логам bakery-контракта для адреса и сезона.
