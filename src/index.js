@@ -6,6 +6,9 @@ import { renderStatCardPng } from './card.js';
 
 const DEFAULT_BASE_URL = 'https://www.rugpullbakery.com';
 const DEFAULT_ABSTRACT_RPC_URL = 'https://api.mainnet.abs.xyz';
+const ABSCOPE_SUGGEST_URL = 'https://abscope.live/api/suggest';
+const ABSCOPE_PORTAL_PROXY_URL = 'https://abscope.live/api/proxy';
+const ABSTRACT_PROFILE_OVERRIDE_BASE = 'https://abstract-assets.abs.xyz/avatars/profile_override';
 const DEFAULT_BAKERY_CONTRACT = '0xFEB79a841D69C08aFCDC7B2BEEC8a6fbbe46C455';
 const DEFAULT_PAYOUT_BPS = [5000, 2000, 1500, 1000, 500];
 const SOLO_LEADERBOARD_BUCKET_SHARE = 0.70;
@@ -89,6 +92,7 @@ const CACHE_STALE_MS = 10 * 60_000;
 const CHECK_INDEX_TTL_MS = 30_000;
 const CHECK_REPORT_TTL_MS = 30_000;
 const CHECK_STATS_TTL_MS = 2 * 60_000;
+const ABSTRACT_PROFILE_TTL_MS = 6 * 60 * 60_000;
 const CHECK_SESSION_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_CONCURRENT_UPDATES = 6;
 const DEFAULT_MAX_SCHEDULED_UPDATES = 24;
@@ -112,6 +116,7 @@ let checkIndexInFlight = null;
 const checkReportCache = new Map();
 const checkStatsCache = new Map();
 const checkReportInFlight = new Map();
+const abstractProfileCache = new Map();
 const seasonStartBlockCache = new Map();
 const processedUpdateIds = new Map();
 let knownChats = new Set();
@@ -427,6 +432,11 @@ function normalizeName(value) {
 
 function isAddress(value) {
   return /^0x[a-fA-F0-9]{40}$/.test(String(value).trim());
+}
+
+function normalizeAddress(value) {
+  const trimmed = String(value ?? '').trim();
+  return isAddress(trimmed) ? trimmed.toLowerCase() : null;
 }
 
 function parseCommandText(text) {
@@ -1340,6 +1350,104 @@ async function fetchProfilesByAddresses(baseUrl, addresses) {
   return results;
 }
 
+export function abstractProfileOverridePngUrl(userId) {
+  const normalized = String(userId ?? '').trim();
+  return normalized ? `${ABSTRACT_PROFILE_OVERRIDE_BASE}/${encodeURIComponent(normalized)}.png` : null;
+}
+
+function abstractProfileFromPortalUser(user) {
+  if (!user) return null;
+  const avatarUrl = abstractProfileOverridePngUrl(user.id) || user.overrideProfilePictureUrl || null;
+  return {
+    name: user.name || null,
+    walletAddress: normalizeAddress(user.walletAddress),
+    profilePictureUrl: avatarUrl,
+    agwProfilePictureUrl: avatarUrl,
+    agwUserId: user.id ? String(user.id) : null,
+  };
+}
+
+async function fetchAbstractPortalStreamer(username) {
+  const normalized = String(username ?? '').trim();
+  if (!normalized || isAddress(normalized)) return null;
+
+  const url = new URL(`${ABSCOPE_PORTAL_PROXY_URL}/streamer/${encodeURIComponent(normalized)}`);
+  const data = await fetchJson(url, { timeoutMs: 3_000 });
+  return data?.streamer ?? data?.user ?? data ?? null;
+}
+
+async function fetchAbstractProfileSuggestions(query) {
+  const normalized = String(query ?? '').trim();
+  if (!normalized || normalized.length < 2) return [];
+
+  const url = new URL(ABSCOPE_SUGGEST_URL);
+  url.searchParams.set('query', normalized);
+  url.searchParams.set('suggest', '1');
+  url.searchParams.set('limit', '6');
+
+  const data = await fetchJson(url, { timeoutMs: 3_000 });
+  return Array.isArray(data?.suggestions) ? data.suggestions : [];
+}
+
+export async function fetchAbstractGlobalWalletProfile(address, hints = []) {
+  const normalizedAddress = normalizeAddress(address);
+  if (!normalizedAddress) return null;
+
+  const cached = abstractProfileCache.get(normalizedAddress);
+  if (cached && Date.now() - cached.generatedAtMs <= ABSTRACT_PROFILE_TTL_MS) return cached.value;
+
+  const queries = [
+    normalizedAddress,
+    ...hints
+      .map((hint) => String(hint ?? '').trim())
+      .filter((hint) => hint && !isAddress(hint)),
+  ];
+  const uniqueQueries = [...new Set(queries.map((query) => query.toLowerCase()))];
+
+  for (const query of uniqueQueries) {
+    try {
+      const suggestions = await fetchAbstractProfileSuggestions(query);
+      const suggestion = suggestions.find((item) => normalizeAddress(item?.resolvedWallet) === normalizedAddress);
+      if (!suggestion) continue;
+
+      let profile = {
+        name: suggestion.username || null,
+        walletAddress: normalizedAddress,
+        profilePictureUrl: suggestion.avatar || null,
+        agwProfilePictureUrl: suggestion.avatar || null,
+        agwUserId: null,
+      };
+
+      if (suggestion.username) {
+        const portalUser = await fetchAbstractPortalStreamer(suggestion.username).catch(() => null);
+        const portalProfile = abstractProfileFromPortalUser(portalUser);
+        if (portalProfile && (!portalProfile.walletAddress || portalProfile.walletAddress === normalizedAddress)) {
+          profile = {
+            ...profile,
+            ...portalProfile,
+            walletAddress: normalizedAddress,
+            name: portalProfile.name || profile.name,
+          };
+        }
+      }
+
+      abstractProfileCache.set(normalizedAddress, {
+        value: profile,
+        generatedAtMs: Date.now(),
+      });
+      return profile;
+    } catch (error) {
+      console.warn(`Could not fetch Abstract Global Wallet profile for ${normalizedAddress}: ${error.message}`);
+    }
+  }
+
+  abstractProfileCache.set(normalizedAddress, {
+    value: null,
+    generatedAtMs: Date.now(),
+  });
+  return null;
+}
+
 async function fetchEthUsd() {
   const fallback = env('ETH_USD_FALLBACK');
   if (fallback) return toNumber(fallback, 'ETH_USD_FALLBACK');
@@ -1706,6 +1814,19 @@ export function renderWelcomeMessage() {
     '<b>/ch</b> - check a player\'s current season profit/loss',
     '<b>/cookie</b> - show the active season reward breakdown',
   ].join('\n');
+}
+
+export function commandKeyboardMarkup() {
+  return {
+    keyboard: [
+      [
+        { text: '/ch' },
+        { text: '/cookie' },
+      ],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 }
 
 export function renderHiddenStatsMessage(stats, generatedAt = new Date()) {
@@ -2478,7 +2599,7 @@ export function renderCheckReport({
     : (isSolo ? 'Leaderboard ROI' : 'Net ROI');
   const rewardLabel = isDivision
     ? `${divisionName} leaderboard reward`
-    : (isSolo ? 'Leaderboard reward' : 'Est. reward');
+    : (isGroupedScore ? 'Your est. reward' : (isSolo ? 'Leaderboard reward' : 'Est. reward'));
   const groupedTopText = isGroupedScore && isGroupedScoreQualifiedRank(rank) ? ' (top 10)' : '';
 
   lines.push(`<b>${escapeHtml(name)}</b>`);
@@ -2583,7 +2704,7 @@ function buildCheckCardData({
   const rankSubvalue = isGroupedScore
     ? (isGroupedScoreQualifiedRank(rank)
         ? (totalTopScore > 0 && leaderboardShare > 0
-            ? `TOP 10 SCORE ${formatPercent(leaderboardShare * 100, 3)}`
+            ? `BAKERY ${formatPercent(leaderboardShare * 100, 2)} / YOU ${formatPercent(memberScoreShare * 100, 2)}`
             : 'TOP 10 SCORE PENDING')
         : `OUTSIDE TOP ${GROUPED_SCORE_QUALIFIED_BAKERIES}`)
     : (isDivision
@@ -2593,9 +2714,11 @@ function buildCheckCardData({
     : (leaderboardShare > 0
         ? `LB SHARE ${formatPercent(leaderboardShare * 100, 3)}`
         : 'ACTIVITY 30% SEPARATE'));
-  const rewardTileLabel = isDivision
-    ? (divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD LB reward' : 'OPEN reward')
-    : (isSolo ? 'LB reward' : 'Est reward');
+  const rewardTileLabel = isGroupedScore
+    ? 'Your reward'
+    : (isDivision
+        ? (divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD LB reward' : 'OPEN reward')
+        : (isSolo ? 'LB reward' : 'Est reward'));
   const roiTileLabel = isDivision
     ? (divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD LB ROI' : 'OPEN ROI')
     : (isSolo ? 'LB ROI' : 'Net ROI');
@@ -2721,8 +2844,12 @@ export async function buildCheckReport(identity) {
   const profilePromise = index.profileMap.get(address)
     ? Promise.resolve(index.profileMap.get(address))
     : fetchProfilesByAddresses(index.baseUrl, [address]).catch(() => []);
+  const abstractProfilePromise = fetchAbstractGlobalWalletProfile(address, [identity]).catch((error) => {
+    console.warn(`Could not fetch AGW profile for /ch (${address}): ${error.message}`);
+    return null;
+  });
 
-  const [bakery, profileLookup, txStats] = await Promise.all([
+  const [bakery, profileLookup, txStats, abstractProfile] = await Promise.all([
     bakeryPromise.catch((error) => {
       console.warn(`Could not fetch bakery for /ch (${member.bakeryId}): ${error.message}`);
       return index.bakeryMap.get(member.bakeryId) ?? {
@@ -2739,6 +2866,7 @@ export async function buildCheckReport(identity) {
         source: 'unavailable',
       };
     }),
+    abstractProfilePromise,
   ]);
 
   const bakeryValue = (isDivisionPayoutModel(index.payoutModel) || isGroupedScorePayoutModel(index.payoutModel))
@@ -2757,6 +2885,20 @@ export async function buildCheckReport(identity) {
     }
   } else if (!profile && profileLookup && !Array.isArray(profileLookup)) {
     profile = profileLookup;
+  }
+  if (abstractProfile) {
+    profile = {
+      ...(profile ?? {}),
+      name: profile?.name ?? abstractProfile.name,
+      profilePictureUrl: abstractProfile.profilePictureUrl ?? profile?.profilePictureUrl,
+      agwProfilePictureUrl: abstractProfile.agwProfilePictureUrl ?? profile?.agwProfilePictureUrl,
+      agwUserId: abstractProfile.agwUserId ?? profile?.agwUserId,
+    };
+    index.profileMap.set(address, profile);
+    if (profile?.name) {
+      index.profileNameMap.set(normalizeName(profile.name), address);
+    }
+    saveCheckIndexCache(index).catch(() => {});
   }
   let memberRank = normalizeRank(member.rank);
   let resolvedBakery = bakery;
@@ -3139,7 +3281,9 @@ export function isHiddenStatsCommand(text) {
 async function sendWelcomeMessage(chatId) {
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
-  await sendMessage(chatId, renderWelcomeMessage());
+  await sendMessage(chatId, renderWelcomeMessage(), {
+    reply_markup: commandKeyboardMarkup(),
+  });
 }
 
 async function sendHiddenStats(chatId) {

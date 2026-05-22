@@ -3,9 +3,11 @@ import test from 'node:test';
 import { renderStatCardPng } from '../src/card.js';
 
 import {
+  abstractProfileOverridePngUrl,
   calculateDivisionPayoutBuckets,
   calculateGroupedScorePayout,
   calculateCookieValues,
+  commandKeyboardMarkup,
   conversationKeyForUpdate,
   createConversationScheduler,
   detectPayoutModel,
@@ -384,6 +386,22 @@ test('renders a welcome message with command descriptions', () => {
   assert.doesNotMatch(message, /statsss777/i);
 });
 
+test('builds a persistent command keyboard', () => {
+  const markup = commandKeyboardMarkup();
+
+  assert.equal(markup.resize_keyboard, true);
+  assert.equal(markup.is_persistent, true);
+  assert.deepEqual(markup.keyboard[0].map((button) => button.text), ['/ch', '/cookie']);
+});
+
+test('builds Abstract profile override avatar URLs', () => {
+  assert.equal(
+    abstractProfileOverridePngUrl('266838'),
+    'https://abstract-assets.abs.xyz/avatars/profile_override/266838.png',
+  );
+  assert.equal(abstractProfileOverridePngUrl(''), null);
+});
+
 test('renders the hidden stats message', () => {
   const message = renderHiddenStatsMessage({
     privateUsers: 79,
@@ -555,7 +573,7 @@ test('renders a grouped score season check report', () => {
   assert.match(report, /Score: <b>15K<\/b>/);
   assert.match(report, /Cookies baked: <b>88.2K<\/b>/);
   assert.match(report, /Rank: <b>#6<\/b>/);
-  assert.match(report, /Est\. reward:/);
+  assert.match(report, /Your est\. reward:/);
   assert.match(report, /Bakery score share: 60% of the 100% top-10 placement pool/);
   assert.match(report, /Member score share: 25% of bakery score/);
   assert.match(report, /Score-share payout can change/);

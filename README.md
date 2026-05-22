@@ -59,7 +59,10 @@ npm start
 - В Season 5/6 `/ch` считает estimated reward только для top-10 bakeries: `bakery score / top-10 score * prize pool`, затем `member score / bakery score`.
 - Season 6 использует score как reward metric, не raw cookies: score растет от cookies baked с daily scaler `+5%` за день сезона.
 - Season 6 rewards могут меняться до конца сезона, потому что score share постоянно меняется.
+- В image card для score-share сезонов rank tile показывает две доли: bakery score share и личную member score share, чтобы было понятно почему rank #2 не означает весь reward.
 - Auto-bake, upgrades, boosts/rugs и random events могут менять будущий score; бот не запускает действия, а только читает live public stats и on-chain fees.
+- Если у игрока есть Abstract Global Wallet profile/avatar, бот пытается подтянуть avatar через тот же публичный lookup-подход, что использует Abscope.
+- `/start` добавляет постоянную Telegram keyboard с кнопками `/ch` и `/cookie`.
 - В solo-сезонах `/ch` считает leaderboard reward по текущему rank игрока.
 - В division-сезоне `/ch` определяет bakery division (`Standard` или `Open`) и считает leaderboard reward по актуальной payout table этой division.
 - `Cook tx` считается по on-chain `Bake`-логам bakery-контракта для адреса и сезона.
