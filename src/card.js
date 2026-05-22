@@ -67,6 +67,7 @@ const TILE_RADIUS = 30;
 const AVATAR_SIZE = 112;
 const AVATAR_X = PANEL_X + 24;
 const AVATAR_Y = 112;
+const AVATAR_FETCH_TIMEOUT_MS = 4_000;
 const avatarImageCache = new Map();
 const CRC_TABLE = new Uint32Array(256).map((_, index) => {
   let crc = index;
@@ -363,14 +364,29 @@ function decodeAvatarBuffer(buffer, contentType = '') {
 }
 
 async function fetchAvatarImage(avatarUrl) {
-  const normalized = String(avatarUrl ?? '').trim();
-  if (!normalized) return null;
+  const avatarUrls = Array.isArray(avatarUrl) ? avatarUrl : [avatarUrl];
+  const normalizedList = [...new Set(avatarUrls.map((value) => String(value ?? '').trim()).filter(Boolean))];
+  if (!normalizedList.length) return null;
+
+  if (normalizedList.length > 1) {
+    for (const normalized of normalizedList) {
+      const avatar = await fetchAvatarImage(normalized);
+      if (avatar) return avatar;
+    }
+    return null;
+  }
+
+  const normalized = normalizedList[0];
   if (avatarImageCache.has(normalized)) return avatarImageCache.get(normalized);
 
   const promise = (async () => {
     const response = await fetch(normalized, {
-      headers: { accept: 'image/png,image/jpeg,image/*;q=0.9,*/*;q=0.8' },
-      signal: AbortSignal.timeout(10_000),
+      headers: {
+        accept: 'image/png,image/jpeg,image/*;q=0.9,*/*;q=0.8',
+        referer: 'https://portal.abs.xyz/',
+        'user-agent': 'Mozilla/5.0 (compatible; RugpullBakeryBot/1.0)',
+      },
+      signal: AbortSignal.timeout(AVATAR_FETCH_TIMEOUT_MS),
     });
 
     if (!response.ok) {
@@ -380,7 +396,10 @@ async function fetchAvatarImage(avatarUrl) {
     const contentType = response.headers.get('content-type') ?? '';
     const buffer = Buffer.from(await response.arrayBuffer());
     return decodeAvatarBuffer(buffer, contentType);
-  })().catch(() => null);
+  })().catch((error) => {
+    console.warn(`Could not load avatar ${normalized}: ${error.message}`);
+    return null;
+  });
 
   avatarImageCache.set(normalized, promise);
   return promise;
@@ -464,7 +483,9 @@ function drawBackground(canvas) {
 
 export async function renderStatCardPng(card) {
   const canvas = new Canvas(WIDTH, HEIGHT);
-  const avatar = card.avatarUrl ? await fetchAvatarImage(card.avatarUrl) : null;
+  const avatar = card.avatarUrls?.length || card.avatarUrl
+    ? await fetchAvatarImage(card.avatarUrls?.length ? card.avatarUrls : card.avatarUrl)
+    : null;
   drawBackground(canvas);
 
   canvas.fillRoundedRect(PANEL_X, HEADER_Y, WIDTH - (PANEL_X * 2), HEADER_HEIGHT, 36, '#173246');

@@ -734,7 +734,7 @@ function unwrapTrpcJson(payload, procedureName) {
 }
 
 async function fetchJson(url, options = {}) {
-  const { timeoutMs = 10_000, ...fetchOptions } = options;
+  const { timeoutMs = 10_000, curlFallback = true, ...fetchOptions } = options;
   try {
     const signal = fetchOptions.signal ?? AbortSignal.timeout(timeoutMs);
     const response = await fetch(url, {
@@ -749,6 +749,8 @@ async function fetchJson(url, options = {}) {
 
     return response.json();
   } catch (error) {
+    if (!curlFallback) throw error;
+
     const timeoutSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
     const curlArgs = [
       '-sS',
@@ -1265,7 +1267,7 @@ function allowApproxGasFallback() {
 }
 
 async function fetchAgent(baseUrl) {
-  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 4_000 });
+  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 2_500, curlFallback: false });
 }
 
 async function fetchActiveSeason(baseUrl) {
@@ -1358,23 +1360,51 @@ export function abstractProfileOverridePngUrl(userId) {
 
 function abstractProfileFromPortalUser(user) {
   if (!user) return null;
-  const avatarUrl = abstractProfileOverridePngUrl(user.id) || user.overrideProfilePictureUrl || null;
+  const avatarUrls = [
+    abstractProfileOverridePngUrl(user.id),
+    user.overrideProfilePictureUrl,
+  ].filter(Boolean);
+  const avatarUrl = preferredAvatarUrl(avatarUrls);
   return {
     name: user.name || null,
     walletAddress: normalizeAddress(user.walletAddress),
     profilePictureUrl: avatarUrl,
     agwProfilePictureUrl: avatarUrl,
+    avatarUrls,
     agwUserId: user.id ? String(user.id) : null,
   };
 }
 
+function uniqueAvatarUrls(...lists) {
+  return [...new Set(lists.flat().map((value) => String(value ?? '').trim()).filter(Boolean))];
+}
+
+function isRenderableAvatarUrl(url) {
+  return /\.(png|jpe?g)(?:[?#]|$)/i.test(String(url ?? ''));
+}
+
+function preferredAvatarUrl(urls) {
+  const uniqueUrls = uniqueAvatarUrls(urls);
+  return uniqueUrls.find(isRenderableAvatarUrl) ?? uniqueUrls[0] ?? null;
+}
+
 function mergeAbstractProfile(profile, abstractProfile) {
   if (!abstractProfile) return profile;
+  const avatarUrls = uniqueAvatarUrls(
+    abstractProfile.avatarUrls,
+    abstractProfile.profilePictureUrl,
+    abstractProfile.agwProfilePictureUrl,
+    profile?.avatarUrls,
+    profile?.profilePictureUrl,
+  );
+  const profilePictureUrl = preferredAvatarUrl(avatarUrls);
+
   return {
     ...(profile ?? {}),
     name: profile?.name ?? abstractProfile.name,
-    profilePictureUrl: abstractProfile.profilePictureUrl ?? profile?.profilePictureUrl,
+    profilePictureUrl: profilePictureUrl ?? abstractProfile.profilePictureUrl ?? profile?.profilePictureUrl,
     agwProfilePictureUrl: abstractProfile.agwProfilePictureUrl ?? profile?.agwProfilePictureUrl,
+    avatarUrls,
     agwUserId: abstractProfile.agwUserId ?? profile?.agwUserId,
   };
 }
@@ -1384,7 +1414,7 @@ async function fetchAbstractPortalStreamer(username) {
   if (!normalized || isAddress(normalized)) return null;
 
   const url = new URL(`${ABSCOPE_PORTAL_PROXY_URL}/streamer/${encodeURIComponent(normalized)}`);
-  const data = await fetchJson(url, { timeoutMs: 6_000 });
+  const data = await fetchJson(url, { timeoutMs: 2_500 });
   return data?.streamer ?? data?.user ?? data ?? null;
 }
 
@@ -1397,7 +1427,7 @@ async function fetchAbstractProfileSuggestions(query) {
   url.searchParams.set('suggest', '1');
   url.searchParams.set('limit', '6');
 
-  const data = await fetchJson(url, { timeoutMs: 6_000 });
+  const data = await fetchJson(url, { timeoutMs: 2_500 });
   return Array.isArray(data?.suggestions) ? data.suggestions : [];
 }
 
@@ -1426,24 +1456,26 @@ export async function fetchAbstractGlobalWalletProfile(address, hints = []) {
       const suggestion = suggestions.find((item) => normalizeAddress(item?.resolvedWallet) === normalizedAddress);
       if (!suggestion) continue;
 
+      const suggestionAvatarUrl = suggestion.avatar || null;
+      const shouldFetchPortal = !isRenderableAvatarUrl(suggestionAvatarUrl);
       let profile = {
         name: suggestion.username || null,
         walletAddress: normalizedAddress,
-        profilePictureUrl: suggestion.avatar || null,
-        agwProfilePictureUrl: suggestion.avatar || null,
+        profilePictureUrl: preferredAvatarUrl([suggestionAvatarUrl]),
+        agwProfilePictureUrl: suggestionAvatarUrl,
+        avatarUrls: uniqueAvatarUrls(suggestionAvatarUrl),
         agwUserId: null,
       };
 
-      if (suggestion.username) {
+      if (suggestion.username && shouldFetchPortal) {
         const portalUser = await fetchAbstractPortalStreamer(suggestion.username).catch(() => null);
         const portalProfile = abstractProfileFromPortalUser(portalUser);
         if (portalProfile && (!portalProfile.walletAddress || portalProfile.walletAddress === normalizedAddress)) {
-          profile = {
-            ...profile,
+          profile = mergeAbstractProfile(profile, {
             ...portalProfile,
             walletAddress: normalizedAddress,
             name: portalProfile.name || profile.name,
-          };
+          });
         }
       }
 
@@ -2299,8 +2331,8 @@ async function fetchExactFeeEntriesForHashes(rpcHttp, transactionHashes) {
 }
 
 async function fetchTotalBakeFeeEth(rpcHttp, transactionHashes, {
-  batchSize = 250,
-  maxConcurrentBatches = 4,
+  batchSize = 800,
+  maxConcurrentBatches = 8,
 } = {}) {
   const uniqueHashes = [...new Set(transactionHashes)];
   if (!uniqueHashes.length) return 0;
@@ -2746,6 +2778,7 @@ function buildCheckCardData({
     address: shortAddress(address),
     clan: `Clan: ${bakery.name}${isDivision ? ` (${divisionName})` : (groupedTopText || (!isSolo && !isGroupedScore && bakeryValue ? ' (top 5)' : ''))}`,
     avatarUrl: profile?.profilePictureUrl ?? null,
+    avatarUrls: uniqueAvatarUrls(profile?.avatarUrls, profile?.profilePictureUrl, profile?.agwProfilePictureUrl),
     tiles: [
       {
         label: isGroupedScore ? 'Score' : 'Cookies',
@@ -3215,13 +3248,6 @@ async function sendPhoto(chatId, photoBuffer, filename, extra = {}) {
   });
 }
 
-async function deleteMessage(chatId, messageId) {
-  return telegramRequest('deleteMessage', {
-    chat_id: chatId,
-    message_id: messageId,
-  });
-}
-
 async function sendChatAction(chatId, action = 'typing') {
   return telegramRequest('sendChatAction', {
     chat_id: chatId,
@@ -3234,15 +3260,6 @@ async function sendChatActionSafely(chatId, action = 'typing') {
     await sendChatAction(chatId, action);
   } catch (error) {
     console.warn(`Could not send chat action: ${error.message}`);
-  }
-}
-
-async function sendProgressMessage(chatId) {
-  try {
-    return await sendMessage(chatId, '<i>Thinking...</i>');
-  } catch (error) {
-    console.warn(`Could not send progress message: ${error.message}`);
-    return null;
   }
 }
 
@@ -3259,15 +3276,6 @@ async function sendCheckResult(chatId, result, extra = {}) {
   } catch (error) {
     console.warn(`Could not render/send stat card: ${error.message}`);
     await sendMessage(chatId, result.text, extra);
-  }
-}
-
-async function deleteProgressMessage(chatId, progressMessage) {
-  if (!progressMessage?.message_id) return;
-  try {
-    await deleteMessage(chatId, progressMessage.message_id);
-  } catch (error) {
-    console.warn(`Could not delete progress message: ${error.message}`);
   }
 }
 
@@ -3404,7 +3412,6 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
     return;
   }
 
-  const progressMessagePromise = sendProgressMessage(chatId);
   try {
     sendChatActionSafely(chatId);
     let resultPromise = checkReportInFlight.get(normalizedIdentity);
@@ -3415,8 +3422,6 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
       checkReportInFlight.set(normalizedIdentity, resultPromise);
     }
     const result = await resultPromise;
-    const progressMessage = await progressMessagePromise;
-    await deleteProgressMessage(chatId, progressMessage);
     if (!result.ok) {
       if (session) {
         const retryPrompt = await sendMessage(chatId, `${result.message}\n\n<i>Reply to this message and try again.</i>`, {
@@ -3448,8 +3453,6 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
     await sendCheckResult(chatId, result);
   } catch (error) {
     console.error(error);
-    const progressMessage = await progressMessagePromise;
-    await deleteProgressMessage(chatId, progressMessage);
     await sendMessage(chatId, 'I could not calculate /ch right now. Please try again in a few seconds.');
   }
 }
