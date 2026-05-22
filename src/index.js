@@ -93,6 +93,7 @@ const CHECK_INDEX_TTL_MS = 30_000;
 const CHECK_REPORT_TTL_MS = 30_000;
 const CHECK_STATS_TTL_MS = 2 * 60_000;
 const ABSTRACT_PROFILE_TTL_MS = 6 * 60 * 60_000;
+const ABSTRACT_PROFILE_NEGATIVE_TTL_MS = 2 * 60_000;
 const CHECK_SESSION_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_CONCURRENT_UPDATES = 6;
 const DEFAULT_MAX_SCHEDULED_UPDATES = 24;
@@ -1367,12 +1368,23 @@ function abstractProfileFromPortalUser(user) {
   };
 }
 
+function mergeAbstractProfile(profile, abstractProfile) {
+  if (!abstractProfile) return profile;
+  return {
+    ...(profile ?? {}),
+    name: profile?.name ?? abstractProfile.name,
+    profilePictureUrl: abstractProfile.profilePictureUrl ?? profile?.profilePictureUrl,
+    agwProfilePictureUrl: abstractProfile.agwProfilePictureUrl ?? profile?.agwProfilePictureUrl,
+    agwUserId: abstractProfile.agwUserId ?? profile?.agwUserId,
+  };
+}
+
 async function fetchAbstractPortalStreamer(username) {
   const normalized = String(username ?? '').trim();
   if (!normalized || isAddress(normalized)) return null;
 
   const url = new URL(`${ABSCOPE_PORTAL_PROXY_URL}/streamer/${encodeURIComponent(normalized)}`);
-  const data = await fetchJson(url, { timeoutMs: 3_000 });
+  const data = await fetchJson(url, { timeoutMs: 6_000 });
   return data?.streamer ?? data?.user ?? data ?? null;
 }
 
@@ -1385,7 +1397,7 @@ async function fetchAbstractProfileSuggestions(query) {
   url.searchParams.set('suggest', '1');
   url.searchParams.set('limit', '6');
 
-  const data = await fetchJson(url, { timeoutMs: 3_000 });
+  const data = await fetchJson(url, { timeoutMs: 6_000 });
   return Array.isArray(data?.suggestions) ? data.suggestions : [];
 }
 
@@ -1394,7 +1406,11 @@ export async function fetchAbstractGlobalWalletProfile(address, hints = []) {
   if (!normalizedAddress) return null;
 
   const cached = abstractProfileCache.get(normalizedAddress);
-  if (cached && Date.now() - cached.generatedAtMs <= ABSTRACT_PROFILE_TTL_MS) return cached.value;
+  if (cached) {
+    const cacheAgeMs = Date.now() - cached.generatedAtMs;
+    const cacheTtlMs = cached.value ? ABSTRACT_PROFILE_TTL_MS : ABSTRACT_PROFILE_NEGATIVE_TTL_MS;
+    if (cacheAgeMs <= cacheTtlMs && (cached.value || hints.length === 0)) return cached.value;
+  }
 
   const queries = [
     normalizedAddress,
@@ -2886,14 +2902,15 @@ export async function buildCheckReport(identity) {
   } else if (!profile && profileLookup && !Array.isArray(profileLookup)) {
     profile = profileLookup;
   }
-  if (abstractProfile) {
-    profile = {
-      ...(profile ?? {}),
-      name: profile?.name ?? abstractProfile.name,
-      profilePictureUrl: abstractProfile.profilePictureUrl ?? profile?.profilePictureUrl,
-      agwProfilePictureUrl: abstractProfile.agwProfilePictureUrl ?? profile?.agwProfilePictureUrl,
-      agwUserId: abstractProfile.agwUserId ?? profile?.agwUserId,
-    };
+  let resolvedAbstractProfile = abstractProfile;
+  if (!resolvedAbstractProfile?.profilePictureUrl && profile?.name) {
+    resolvedAbstractProfile = await fetchAbstractGlobalWalletProfile(address, [profile.name]).catch((error) => {
+      console.warn(`Could not retry AGW profile lookup for /ch (${address}, ${profile.name}): ${error.message}`);
+      return null;
+    });
+  }
+  if (resolvedAbstractProfile) {
+    profile = mergeAbstractProfile(profile, resolvedAbstractProfile);
     index.profileMap.set(address, profile);
     if (profile?.name) {
       index.profileNameMap.set(normalizeName(profile.name), address);
