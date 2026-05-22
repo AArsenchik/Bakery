@@ -1864,19 +1864,6 @@ export function renderWelcomeMessage() {
   ].join('\n');
 }
 
-export function commandKeyboardMarkup() {
-  return {
-    keyboard: [
-      [
-        { text: '/ch' },
-        { text: '/cookie' },
-      ],
-    ],
-    resize_keyboard: true,
-    is_persistent: true,
-  };
-}
-
 export function renderHiddenStatsMessage(stats, generatedAt = new Date()) {
   return [
     '<b>Bot Stats</b>',
@@ -3248,6 +3235,13 @@ async function sendPhoto(chatId, photoBuffer, filename, extra = {}) {
   });
 }
 
+async function deleteMessage(chatId, messageId) {
+  return telegramRequest('deleteMessage', {
+    chat_id: chatId,
+    message_id: messageId,
+  });
+}
+
 async function sendChatAction(chatId, action = 'typing') {
   return telegramRequest('sendChatAction', {
     chat_id: chatId,
@@ -3260,6 +3254,15 @@ async function sendChatActionSafely(chatId, action = 'typing') {
     await sendChatAction(chatId, action);
   } catch (error) {
     console.warn(`Could not send chat action: ${error.message}`);
+  }
+}
+
+async function sendProgressMessage(chatId) {
+  try {
+    return await sendMessage(chatId, '<i>Thinking...</i>');
+  } catch (error) {
+    console.warn(`Could not send progress message: ${error.message}`);
+    return null;
   }
 }
 
@@ -3276,6 +3279,15 @@ async function sendCheckResult(chatId, result, extra = {}) {
   } catch (error) {
     console.warn(`Could not render/send stat card: ${error.message}`);
     await sendMessage(chatId, result.text, extra);
+  }
+}
+
+async function deleteProgressMessage(chatId, progressMessage) {
+  if (!progressMessage?.message_id) return;
+  try {
+    await deleteMessage(chatId, progressMessage.message_id);
+  } catch (error) {
+    console.warn(`Could not delete progress message: ${error.message}`);
   }
 }
 
@@ -3307,7 +3319,9 @@ async function sendWelcomeMessage(chatId) {
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
   await sendMessage(chatId, renderWelcomeMessage(), {
-    reply_markup: commandKeyboardMarkup(),
+    reply_markup: {
+      remove_keyboard: true,
+    },
   });
 }
 
@@ -3412,6 +3426,20 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
     return;
   }
 
+  let progressMessage = null;
+  const progressMessagePromise = sendProgressMessage(chatId).then((message) => {
+    progressMessage = message;
+    return message;
+  });
+  const cleanupProgressMessage = () => {
+    if (progressMessage) {
+      deleteProgressMessage(chatId, progressMessage);
+      return;
+    }
+
+    progressMessagePromise.then((message) => deleteProgressMessage(chatId, message));
+  };
+
   try {
     sendChatActionSafely(chatId);
     let resultPromise = checkReportInFlight.get(normalizedIdentity);
@@ -3422,6 +3450,7 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
       checkReportInFlight.set(normalizedIdentity, resultPromise);
     }
     const result = await resultPromise;
+    cleanupProgressMessage();
     if (!result.ok) {
       if (session) {
         const retryPrompt = await sendMessage(chatId, `${result.message}\n\n<i>Reply to this message and try again.</i>`, {
@@ -3453,6 +3482,7 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
     await sendCheckResult(chatId, result);
   } catch (error) {
     console.error(error);
+    cleanupProgressMessage();
     await sendMessage(chatId, 'I could not calculate /ch right now. Please try again in a few seconds.');
   }
 }

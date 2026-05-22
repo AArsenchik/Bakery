@@ -62,7 +62,6 @@ npm start
 - В image card для score-share сезонов rank tile показывает две доли: bakery score share и личную member score share, чтобы было понятно почему rank #2 не означает весь reward.
 - Auto-bake, upgrades, boosts/rugs и random events могут менять будущий score; бот не запускает действия, а только читает live public stats и on-chain fees.
 - Если у игрока есть Abstract Global Wallet profile/avatar, бот пытается подтянуть avatar через тот же публичный lookup-подход, что использует Abscope.
-- `/start` добавляет постоянную Telegram keyboard с кнопками `/ch` и `/cookie`.
 - В solo-сезонах `/ch` считает leaderboard reward по текущему rank игрока.
 - В division-сезоне `/ch` определяет bakery division (`Standard` или `Open`) и считает leaderboard reward по актуальной payout table этой division.
 - `Cook tx` считается по on-chain `Bake`-логам bakery-контракта для адреса и сезона.
