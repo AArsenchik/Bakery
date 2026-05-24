@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
@@ -92,6 +93,8 @@ const CACHE_STALE_MS = 10 * 60_000;
 const CHECK_INDEX_TTL_MS = 30_000;
 const CHECK_REPORT_TTL_MS = 30_000;
 const CHECK_STATS_TTL_MS = 2 * 60_000;
+const STAT_CARD_PHOTO_CACHE_TTL_MS = 5 * 60_000;
+const STAT_CARD_PHOTO_CACHE_MAX = 100;
 const ABSTRACT_PROFILE_TTL_MS = 6 * 60 * 60_000;
 const ABSTRACT_PROFILE_NEGATIVE_TTL_MS = 2 * 60_000;
 const CHECK_SESSION_TTL_MS = 10 * 60_000;
@@ -118,6 +121,7 @@ const checkReportCache = new Map();
 const checkStatsCache = new Map();
 const checkReportInFlight = new Map();
 const abstractProfileCache = new Map();
+const statCardPhotoCache = new Map();
 const seasonStartBlockCache = new Map();
 const processedUpdateIds = new Map();
 let knownChats = new Set();
@@ -3235,6 +3239,14 @@ async function sendPhoto(chatId, photoBuffer, filename, extra = {}) {
   });
 }
 
+async function sendPhotoByFileId(chatId, fileId, extra = {}) {
+  return telegramRequest('sendPhoto', {
+    chat_id: chatId,
+    photo: fileId,
+    ...extra,
+  });
+}
+
 async function deleteMessage(chatId, messageId) {
   return telegramRequest('deleteMessage', {
     chat_id: chatId,
@@ -3266,6 +3278,72 @@ async function sendProgressMessage(chatId) {
   }
 }
 
+function statCardCacheKey(cardData) {
+  return createHash('sha256').update(JSON.stringify(cardData)).digest('hex');
+}
+
+function pruneStatCardPhotoCache(now = Date.now()) {
+  for (const [key, entry] of statCardPhotoCache) {
+    if (now - entry.generatedAtMs > STAT_CARD_PHOTO_CACHE_TTL_MS) {
+      statCardPhotoCache.delete(key);
+    }
+  }
+
+  while (statCardPhotoCache.size > STAT_CARD_PHOTO_CACHE_MAX) {
+    const oldestKey = statCardPhotoCache.keys().next().value;
+    statCardPhotoCache.delete(oldestKey);
+  }
+}
+
+function getStatCardPhotoCacheEntry(key, now = Date.now()) {
+  const entry = statCardPhotoCache.get(key);
+  if (!entry) return null;
+  if (now - entry.generatedAtMs > STAT_CARD_PHOTO_CACHE_TTL_MS) {
+    statCardPhotoCache.delete(key);
+    return null;
+  }
+  return entry;
+}
+
+function setStatCardPhotoCacheEntry(key, patch) {
+  const existing = getStatCardPhotoCacheEntry(key) ?? {};
+  const entry = {
+    ...existing,
+    ...patch,
+    generatedAtMs: Date.now(),
+  };
+  statCardPhotoCache.set(key, entry);
+  pruneStatCardPhotoCache();
+  return entry;
+}
+
+function extractPhotoFileId(result) {
+  const photos = Array.isArray(result?.photo) ? result.photo : [];
+  return photos.at(-1)?.file_id ?? null;
+}
+
+async function getRenderedStatCardBuffer(cacheKey, cardData) {
+  const cached = getStatCardPhotoCacheEntry(cacheKey);
+  if (cached?.buffer) return cached.buffer;
+  if (cached?.renderPromise) return cached.renderPromise;
+
+  const renderPromise = renderStatCardPng(cardData)
+    .then((buffer) => {
+      setStatCardPhotoCacheEntry(cacheKey, { buffer, renderPromise: null });
+      return buffer;
+    })
+    .catch((error) => {
+      const latest = getStatCardPhotoCacheEntry(cacheKey);
+      if (latest?.renderPromise === renderPromise) {
+        statCardPhotoCache.delete(cacheKey);
+      }
+      throw error;
+    });
+
+  setStatCardPhotoCacheEntry(cacheKey, { renderPromise });
+  return renderPromise;
+}
+
 async function sendCheckResult(chatId, result, extra = {}) {
   if (!result?.cardData) {
     await sendMessage(chatId, result.text, extra);
@@ -3273,9 +3351,27 @@ async function sendCheckResult(chatId, result, extra = {}) {
   }
 
   try {
-    const photoBuffer = await renderStatCardPng(result.cardData);
-    await sendChatActionSafely(chatId, 'upload_photo');
-    await sendPhoto(chatId, photoBuffer, 'season-check.png', extra);
+    const cacheKey = statCardCacheKey(result.cardData);
+    const cachedPhoto = getStatCardPhotoCacheEntry(cacheKey);
+
+    if (cachedPhoto?.fileId) {
+      try {
+        void sendChatActionSafely(chatId, 'upload_photo');
+        await sendPhotoByFileId(chatId, cachedPhoto.fileId, extra);
+        return;
+      } catch (error) {
+        console.warn(`Could not reuse Telegram photo file_id: ${error.message}`);
+        statCardPhotoCache.delete(cacheKey);
+      }
+    }
+
+    void sendChatActionSafely(chatId, 'upload_photo');
+    const photoBuffer = await getRenderedStatCardBuffer(cacheKey, result.cardData);
+    const sentPhoto = await sendPhoto(chatId, photoBuffer, 'season-check.png', extra);
+    const fileId = extractPhotoFileId(sentPhoto);
+    if (fileId) {
+      setStatCardPhotoCacheEntry(cacheKey, { fileId, buffer: null, renderPromise: null });
+    }
   } catch (error) {
     console.warn(`Could not render/send stat card: ${error.message}`);
     await sendMessage(chatId, result.text, extra);
@@ -3450,8 +3546,8 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
       checkReportInFlight.set(normalizedIdentity, resultPromise);
     }
     const result = await resultPromise;
-    cleanupProgressMessage();
     if (!result.ok) {
+      cleanupProgressMessage();
       if (session) {
         const retryPrompt = await sendMessage(chatId, `${result.message}\n\n<i>Reply to this message and try again.</i>`, {
           reply_to_message_id: session.promptMessageId ?? session.sourceMessageId,
@@ -3480,6 +3576,7 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
       generatedAtMs: Date.now(),
     });
     await sendCheckResult(chatId, result);
+    cleanupProgressMessage();
   } catch (error) {
     console.error(error);
     cleanupProgressMessage();
