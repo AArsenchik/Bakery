@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { renderStatCardPng } from './card.js';
 
@@ -83,12 +83,13 @@ const CHECK_MEMBER_BAKERY_LIMIT = 10;
 const CHECK_MEMBER_FETCH_LIMIT = 150;
 const CHECK_TOP_CHEF_PAGES = 3;
 const COOKIE_UNIT = 1000;
-const CACHE_FILE = new URL('../.cache/latest-report.json', import.meta.url);
-const CHECK_INDEX_FILE = new URL('../.cache/latest-check-index.json', import.meta.url);
-const CHAT_REGISTRY_FILE = new URL('../.cache/known-chats.json', import.meta.url);
-const SAVED_ACCOUNTS_FILE = new URL('../.cache/saved-accounts.json', import.meta.url);
+const DATA_DIR_URL = runtimeDataDirUrl();
+const CACHE_FILE = dataFileUrl('latest-report.json');
+const CHECK_INDEX_FILE = dataFileUrl('latest-check-index.json');
+const CHAT_REGISTRY_FILE = dataFileUrl('known-chats.json');
+const SAVED_ACCOUNTS_FILE = dataFileUrl('saved-accounts.json');
 const BASELINE_CHAT_REGISTRY_FILE = new URL('../data/all-time-known-chats-baseline.json', import.meta.url);
-const BOT_LOCK_FILE = new URL('../.cache/bot.lock.json', import.meta.url);
+const BOT_LOCK_FILE = dataFileUrl('bot.lock.json');
 const CACHE_TTL_MS = 30_000;
 const CACHE_STALE_MS = 10 * 60_000;
 const CHECK_INDEX_TTL_MS = 30_000;
@@ -167,6 +168,22 @@ function candidateBaseUrls() {
 function env(name, fallback = undefined) {
   const value = process.env[name];
   return value === undefined || value === '' ? fallback : value;
+}
+
+function runtimeDataDirUrl() {
+  const configured = env('PERSISTENT_DATA_DIR')
+    ?? env('DATA_DIR')
+    ?? env('RAILWAY_VOLUME_MOUNT_PATH')
+    ?? (isRailwayRuntime() ? '/data' : null);
+  const dataDir = configured
+    ? `${String(configured).replace(/\/+$/, '')}/`
+    : fileURLToPath(new URL('../.cache/', import.meta.url));
+
+  return pathToFileURL(dataDir.endsWith('/') ? dataDir : `${dataDir}/`);
+}
+
+function dataFileUrl(filename) {
+  return new URL(filename, DATA_DIR_URL);
 }
 
 function toNumber(value, label) {
@@ -692,6 +709,11 @@ async function readCacheFile(cacheFile) {
 async function writeCacheFile(cacheFile, cache) {
   await mkdir(new URL('.', cacheFile), { recursive: true });
   await writeFile(cacheFile, JSON.stringify(cache, null, 2));
+}
+
+async function ensureDataDir() {
+  await mkdir(DATA_DIR_URL, { recursive: true });
+  console.log(`Using data directory: ${fileURLToPath(DATA_DIR_URL)}`);
 }
 
 async function loadReportCache() {
@@ -4287,6 +4309,7 @@ async function pollingLoop() {
   const inFlightUpdates = new Set();
 
   await acquireBotLock();
+  await ensureDataDir();
   await loadReportCache();
   await loadCheckIndexCache();
   await loadKnownChats();
