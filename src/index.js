@@ -3891,39 +3891,53 @@ async function handleSaveAccountIdentity(chatId, userId, identity, session = nul
 }
 
 async function handleMyStatsButton(chatId, userId, messageId = null) {
-  const saved = getSavedAccount(userId);
-  if (!saved?.identity) {
-    const message = `No saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> and send your Rugpull Bakery username or wallet address once.`;
-    if (messageId) {
-      await editMenuMessage(chatId, messageId, message, noSavedAccountInlineMarkup());
-    } else {
-      await sendMessage(chatId, message, { reply_markup: noSavedAccountInlineMarkup() });
+  try {
+    const saved = getSavedAccount(userId);
+    if (!saved?.identity) {
+      const message = `No saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> and send your Rugpull Bakery username or wallet address once.`;
+      if (messageId) {
+        await editMenuMessage(chatId, messageId, message, noSavedAccountInlineMarkup());
+      } else {
+        await sendMessage(chatId, message, { reply_markup: noSavedAccountInlineMarkup() });
+      }
+      return;
     }
-    return;
-  }
 
-  if (messageId) {
-    await editMenuMessage(
-      chatId,
-      messageId,
-      `<b>My stats</b>\n\nCalculating stats for <code>${escapeHtml(saved.identity)}</code>...`,
-      backToMainInlineMarkup(),
-    );
-  }
+    if (messageId) {
+      await editMenuMessage(
+        chatId,
+        messageId,
+        `<b>My stats</b>\n\nCalculating stats for <code>${escapeHtml(saved.identity)}</code>...`,
+        backToMainInlineMarkup(),
+      );
+    }
 
-  await handleCheckIdentity(chatId, userId, saved.identity, null, {
-    progressMessage: !messageId,
-    resultExtra: messageId ? { reply_markup: null } : {},
-    onSuccess: messageId
-      ? () => editMenuMessage(chatId, messageId, '<b>My stats</b>\n\nDone. The stat card was sent below.', mainMenuInlineMarkup())
-      : null,
-    onFailure: messageId
-      ? (result) => editMenuMessage(chatId, messageId, result.message, noSavedAccountInlineMarkup())
-      : null,
-    onError: messageId
-      ? () => editMenuMessage(chatId, messageId, 'I could not calculate your stats right now. Please try again in a few seconds.', mainMenuInlineMarkup())
-      : null,
-  });
+    await handleCheckIdentity(chatId, userId, saved.identity, null, {
+      progressMessage: !messageId,
+      resultExtra: messageId ? { reply_markup: null } : {},
+      onSuccess: messageId
+        ? () => editMenuMessage(chatId, messageId, '<b>My stats</b>\n\nDone. The stat card was sent below.', mainMenuInlineMarkup())
+        : null,
+      onFailure: messageId
+        ? (result) => editMenuMessage(chatId, messageId, result.message, noSavedAccountInlineMarkup())
+        : null,
+      onError: messageId
+        ? () => editMenuMessage(chatId, messageId, 'I could not calculate your stats right now. Please try again in a few seconds.', mainMenuInlineMarkup())
+        : null,
+    });
+  } catch (error) {
+    console.error(`My stats failed for user ${userId}:`, error);
+    const message = 'I could not calculate your stats right now. Please try again in a few seconds.';
+    if (messageId) {
+      await editMenuMessage(chatId, messageId, message, mainMenuInlineMarkup()).catch(async () => {
+        await sendMessage(chatId, message, { reply_markup: mainMenuInlineMarkup() });
+      });
+      return;
+    }
+    await sendMessage(chatId, message, { reply_markup: mainMenuInlineMarkup() }).catch((sendError) => {
+      console.warn(`Could not send My stats fallback: ${sendError.message}`);
+    });
+  }
 }
 
 async function handleForgetSavedAccount(chatId, userId, messageId = null) {
@@ -3941,14 +3955,6 @@ async function handleForgetSavedAccount(chatId, userId, messageId = null) {
 
 async function handleCheckIdentity(chatId, userId, identity, session = null, options = {}) {
   const normalizedIdentity = String(identity).trim().toLowerCase();
-  const cached = checkReportCache.get(normalizedIdentity);
-  if (cached && Date.now() - cached.generatedAtMs <= CHECK_REPORT_TTL_MS) {
-    if (session) checkSessions.delete(makeCheckSessionKey(chatId, userId));
-    await sendCheckResult(chatId, cached.result, options.resultExtra ?? {});
-    if (options.onSuccess) await options.onSuccess(cached.result);
-    return;
-  }
-
   let progressMessage = null;
   const useProgressMessage = options.progressMessage !== false;
   const progressMessagePromise = useProgressMessage
@@ -3968,6 +3974,14 @@ async function handleCheckIdentity(chatId, userId, identity, session = null, opt
   };
 
   try {
+    const cached = checkReportCache.get(normalizedIdentity);
+    if (cached && Date.now() - cached.generatedAtMs <= CHECK_REPORT_TTL_MS) {
+      if (session) checkSessions.delete(makeCheckSessionKey(chatId, userId));
+      await sendCheckResult(chatId, cached.result, options.resultExtra ?? {});
+      if (options.onSuccess) await options.onSuccess(cached.result);
+      return;
+    }
+
     sendChatActionSafely(chatId);
     let resultPromise = checkReportInFlight.get(normalizedIdentity);
     if (!resultPromise) {
@@ -4286,7 +4300,14 @@ async function pollingLoop() {
   }
 }
 
-  if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  process.on('unhandledRejection', (error) => {
+    console.error('Unhandled promise rejection:', error);
+  });
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught exception:', error);
+  });
+
   const cleanup = () => {
     releaseBotLock().catch(() => {});
   };
