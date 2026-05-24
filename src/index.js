@@ -103,6 +103,9 @@ const CHECK_SESSION_TTL_MS = 10 * 60_000;
 const DEFAULT_MAX_CONCURRENT_UPDATES = 6;
 const DEFAULT_MAX_SCHEDULED_UPDATES = 24;
 const PROCESSED_UPDATE_TTL_MS = 10 * 60_000;
+const DEFAULT_TELEGRAM_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_TELEGRAM_UPLOAD_TIMEOUT_MS = 45_000;
+const TELEGRAM_LONG_POLL_GRACE_MS = 5_000;
 const HIDDEN_STATS_COMMAND = '/statsss777';
 const MOSCOW_TIME_ZONE = 'Europe/Moscow';
 const PAYOUT_MODEL_LEGACY = 'legacy-top5';
@@ -603,7 +606,16 @@ function processExists(pid) {
   }
 }
 
+function isRailwayRuntime() {
+  return Boolean(env('RAILWAY_ENVIRONMENT') || env('RAILWAY_SERVICE_ID') || env('RAILWAY_PROJECT_ID'));
+}
+
 async function acquireBotLock() {
+  if (isRailwayRuntime()) {
+    botLockAcquired = false;
+    return;
+  }
+
   await mkdir(new URL('.', BOT_LOCK_FILE), { recursive: true });
 
   try {
@@ -3286,14 +3298,24 @@ function refreshReportCacheInBackground(force = false) {
   });
 }
 
+function telegramRequestTimeoutMs(method, payload, fallbackMs = DEFAULT_TELEGRAM_REQUEST_TIMEOUT_MS) {
+  const timeoutSeconds = Number(payload?.timeout);
+  if (method === 'getUpdates' && Number.isFinite(timeoutSeconds) && timeoutSeconds > 0) {
+    return (timeoutSeconds * 1000) + TELEGRAM_LONG_POLL_GRACE_MS;
+  }
+  return fallbackMs;
+}
+
 async function telegramRequest(method, payload) {
   const token = env('TELEGRAM_BOT_TOKEN');
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
+  const timeoutMs = telegramRequestTimeoutMs(method, payload);
 
   const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   const data = await response.json();
@@ -3355,7 +3377,8 @@ async function answerCallbackQuery(callbackQueryId, text = null) {
   });
 }
 
-async function telegramMultipartRequest(method, fields) {
+async function telegramMultipartRequest(method, fields, options = {}) {
+  const { timeoutMs = DEFAULT_TELEGRAM_UPLOAD_TIMEOUT_MS } = options;
   const token = env('TELEGRAM_BOT_TOKEN');
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
 
@@ -3376,6 +3399,7 @@ async function telegramMultipartRequest(method, fields) {
   const response = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
     method: 'POST',
     body: form,
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   const data = await response.json();
