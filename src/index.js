@@ -95,6 +95,7 @@ const CHECK_REPORT_TTL_MS = 30_000;
 const CHECK_STATS_TTL_MS = 2 * 60_000;
 const STAT_CARD_PHOTO_CACHE_TTL_MS = 5 * 60_000;
 const STAT_CARD_PHOTO_CACHE_MAX = 100;
+const BOT_LOCK_STALE_MS = 10 * 60_000;
 const ABSTRACT_PROFILE_TTL_MS = 6 * 60 * 60_000;
 const ABSTRACT_PROFILE_NEGATIVE_TTL_MS = 2 * 60_000;
 const CHECK_SESSION_TTL_MS = 10 * 60_000;
@@ -593,8 +594,21 @@ async function acquireBotLock() {
   try {
     const existing = JSON.parse(await readFile(BOT_LOCK_FILE, 'utf8'));
     const existingPid = Number(existing?.pid);
-    if (Number.isInteger(existingPid) && existingPid > 0 && existingPid !== process.pid && processExists(existingPid)) {
+    const lockAgeMs = Date.now() - Date.parse(existing?.startedAt ?? 0);
+    const lockLooksFresh = Number.isFinite(lockAgeMs) && lockAgeMs <= BOT_LOCK_STALE_MS;
+
+    if (
+      Number.isInteger(existingPid)
+      && existingPid > 0
+      && existingPid !== process.pid
+      && processExists(existingPid)
+      && lockLooksFresh
+    ) {
       throw new Error(`Another bot instance is already running with PID ${existingPid}`);
+    }
+
+    if (Number.isInteger(existingPid) && existingPid > 0 && existingPid !== process.pid && !lockLooksFresh) {
+      console.warn(`Ignoring stale bot lock from PID ${existingPid}`);
     }
   } catch (error) {
     if (error.code && error.code !== 'ENOENT') {
@@ -3648,6 +3662,21 @@ async function pollingLoop() {
   refreshCheckIndexInBackground();
   setInterval(refreshReportCacheInBackground, CACHE_TTL_MS).unref();
   setInterval(refreshCheckIndexInBackground, CHECK_INDEX_TTL_MS).unref();
+
+  try {
+    const staleUpdates = await telegramRequest('getUpdates', {
+      offset: -1,
+      timeout: 0,
+      allowed_updates: ['message'],
+    });
+    const latestUpdate = Array.isArray(staleUpdates) ? staleUpdates.at(-1) : null;
+    if (latestUpdate?.update_id !== undefined) {
+      offset = latestUpdate.update_id + 1;
+      console.log(`Skipped stale Telegram updates up to ${latestUpdate.update_id}.`);
+    }
+  } catch (error) {
+    console.warn(`Could not skip stale Telegram updates on startup: ${error.message}`);
+  }
 
   console.log('Rugpull Bakery Telegram bot is polling.');
   for (;;) {
