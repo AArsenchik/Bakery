@@ -36,13 +36,14 @@ npm start
 /ch
 ```
 
-Кнопки в Telegram:
+Inline-кнопки в Telegram:
 
 - `📊 My stats` - показывает статистику сохраненного аккаунта.
 - `🔎 Check player` - просит username/address и проверяет любого игрока.
 - `🍪 Rewards` - показывает текущий reward breakdown сезона.
 - `💾 Save account` - сохраняет username/address за Telegram user id.
 - `🗑 Forget account` - удаляет сохраненный аккаунт.
+- `/start` также скрывает старую нижнюю клавиатуру, если она осталась у пользователя после прошлой версии.
 
 ## Команда `/ch`
 

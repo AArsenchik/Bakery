@@ -118,6 +118,12 @@ const BUTTON_REWARDS = '🍪 Rewards';
 const BUTTON_SAVE_ACCOUNT = '💾 Save account';
 const BUTTON_FORGET_ACCOUNT = '🗑 Forget account';
 const BUTTON_HELP = 'ℹ️ Help';
+const ACTION_MY_STATS = 'my_stats';
+const ACTION_CHECK_PLAYER = 'check_player';
+const ACTION_REWARDS = 'rewards';
+const ACTION_SAVE_ACCOUNT = 'save_account';
+const ACTION_FORGET_ACCOUNT = 'forget_account';
+const ACTION_HELP = 'help';
 
 const MEDALS = ['🥇', '🥈', '🥉', '🏅', '🏅'];
 const checkSessions = new Map();
@@ -527,9 +533,9 @@ export function createConversationScheduler(maxConcurrent = DEFAULT_MAX_CONCURRE
 }
 
 export function conversationKeyForUpdate(update) {
-  const message = update?.message ?? update?.edited_message;
+  const message = update?.message ?? update?.edited_message ?? update?.callback_query?.message;
   const chatId = message?.chat?.id;
-  const userId = message?.from?.id;
+  const userId = update?.callback_query?.from?.id ?? message?.from?.id;
 
   if (chatId !== undefined && userId !== undefined) {
     return `${String(chatId)}:${String(userId)}`;
@@ -1937,24 +1943,22 @@ export function renderWelcomeMessage() {
   ].join('\n');
 }
 
-export function commandKeyboardMarkup() {
+export function mainMenuInlineMarkup() {
   return {
-    keyboard: [
+    inline_keyboard: [
       [
-        { text: BUTTON_MY_STATS },
-        { text: BUTTON_CHECK_PLAYER },
+        { text: BUTTON_MY_STATS, callback_data: ACTION_MY_STATS },
+        { text: BUTTON_CHECK_PLAYER, callback_data: ACTION_CHECK_PLAYER },
       ],
       [
-        { text: BUTTON_REWARDS },
-        { text: BUTTON_SAVE_ACCOUNT },
+        { text: BUTTON_REWARDS, callback_data: ACTION_REWARDS },
+        { text: BUTTON_SAVE_ACCOUNT, callback_data: ACTION_SAVE_ACCOUNT },
       ],
       [
-        { text: BUTTON_FORGET_ACCOUNT },
-        { text: BUTTON_HELP },
+        { text: BUTTON_FORGET_ACCOUNT, callback_data: ACTION_FORGET_ACCOUNT },
+        { text: BUTTON_HELP, callback_data: ACTION_HELP },
       ],
     ],
-    resize_keyboard: true,
-    is_persistent: true,
   };
 }
 
@@ -3285,6 +3289,13 @@ async function sendMessage(chatId, text, extra = {}) {
   });
 }
 
+async function answerCallbackQuery(callbackQueryId, text = null) {
+  return telegramRequest('answerCallbackQuery', {
+    callback_query_id: callbackQueryId,
+    ...(text ? { text } : {}),
+  });
+}
+
 async function telegramMultipartRequest(method, fields) {
   const token = env('TELEGRAM_BOT_TOKEN');
   if (!token) throw new Error('TELEGRAM_BOT_TOKEN is required');
@@ -3436,18 +3447,25 @@ async function getRenderedStatCardBuffer(cacheKey, cardData) {
 
 async function sendCheckResult(chatId, result, extra = {}) {
   if (!result?.cardData) {
-    await sendMessage(chatId, result.text, extra);
+    await sendMessage(chatId, result.text, {
+      reply_markup: mainMenuInlineMarkup(),
+      ...extra,
+    });
     return;
   }
 
   try {
+    const photoExtra = {
+      reply_markup: mainMenuInlineMarkup(),
+      ...extra,
+    };
     const cacheKey = statCardCacheKey(result.cardData);
     const cachedPhoto = getStatCardPhotoCacheEntry(cacheKey);
 
     if (cachedPhoto?.fileId) {
       try {
         void sendChatActionSafely(chatId, 'upload_photo');
-        await sendPhotoByFileId(chatId, cachedPhoto.fileId, extra);
+        await sendPhotoByFileId(chatId, cachedPhoto.fileId, photoExtra);
         return;
       } catch (error) {
         console.warn(`Could not reuse Telegram photo file_id: ${error.message}`);
@@ -3457,7 +3475,7 @@ async function sendCheckResult(chatId, result, extra = {}) {
 
     void sendChatActionSafely(chatId, 'upload_photo');
     const photoBuffer = await getRenderedStatCardBuffer(cacheKey, result.cardData);
-    const sentPhoto = await sendPhoto(chatId, photoBuffer, 'season-check.png', extra);
+    const sentPhoto = await sendPhoto(chatId, photoBuffer, 'season-check.png', photoExtra);
     const fileId = extractPhotoFileId(sentPhoto);
     if (fileId) {
       setStatCardPhotoCacheEntry(cacheKey, { fileId, buffer: null, renderPromise: null });
@@ -3474,6 +3492,21 @@ async function deleteProgressMessage(chatId, progressMessage) {
     await deleteMessage(chatId, progressMessage.message_id);
   } catch (error) {
     console.warn(`Could not delete progress message: ${error.message}`);
+  }
+}
+
+async function clearReplyKeyboard(chatId) {
+  try {
+    const message = await sendMessage(chatId, 'Updating menu...', {
+      reply_markup: {
+        remove_keyboard: true,
+      },
+    });
+    deleteMessage(chatId, message.message_id).catch((error) => {
+      console.warn(`Could not delete keyboard cleanup message: ${error.message}`);
+    });
+  } catch (error) {
+    console.warn(`Could not clear old reply keyboard: ${error.message}`);
   }
 }
 
@@ -3524,8 +3557,9 @@ export function isHiddenStatsCommand(text) {
 async function sendWelcomeMessage(chatId) {
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
+  await clearReplyKeyboard(chatId);
   await sendMessage(chatId, renderWelcomeMessage(), {
-    reply_markup: commandKeyboardMarkup(),
+    reply_markup: mainMenuInlineMarkup(),
   });
 }
 
@@ -3565,25 +3599,27 @@ async function sendValueReport(chatId) {
     sendChatActionSafely(chatId);
 
     if (isCacheFresh(reportCache)) {
-      await sendMessage(chatId, reportCache.text);
+      await sendMessage(chatId, reportCache.text, { reply_markup: mainMenuInlineMarkup() });
       refreshReportCacheInBackground();
       return;
     }
 
     if (isCacheUsable(reportCache)) {
-      await sendMessage(chatId, `${reportCache.text}\n\n<i>Refreshing live data in the background.</i>`);
+      await sendMessage(chatId, `${reportCache.text}\n\n<i>Refreshing live data in the background.</i>`, {
+        reply_markup: mainMenuInlineMarkup(),
+      });
       refreshReportCacheInBackground();
       return;
     }
 
     const cache = await refreshReportCache();
-    await sendMessage(chatId, cache.text);
+    await sendMessage(chatId, cache.text, { reply_markup: mainMenuInlineMarkup() });
   } catch (error) {
     console.error(error);
     const message = reportCache?.text
       ? `${reportCache.text}\n\n<i>Live refresh failed, showing the latest cached report.</i>`
       : 'Could not calculate cookie value right now. Please try again in a few seconds.';
-    await sendMessage(chatId, message);
+    await sendMessage(chatId, message, { reply_markup: mainMenuInlineMarkup() });
   }
 }
 
@@ -3681,7 +3717,7 @@ async function handleSaveAccountIdentity(chatId, userId, identity, session = nul
   await sendMessage(
     chatId,
     `Saved account: <code>${escapeHtml(normalizedIdentity)}</code>\n\nTap <b>${BUTTON_MY_STATS}</b> to check it without typing again.`,
-    { reply_markup: commandKeyboardMarkup() },
+    { reply_markup: mainMenuInlineMarkup() },
   );
 }
 
@@ -3691,7 +3727,7 @@ async function handleMyStatsButton(chatId, userId) {
     await sendMessage(
       chatId,
       `No saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> and send your Rugpull Bakery username or wallet address once.`,
-      { reply_markup: commandKeyboardMarkup() },
+      { reply_markup: mainMenuInlineMarkup() },
     );
     return;
   }
@@ -3706,8 +3742,49 @@ async function handleForgetSavedAccount(chatId, userId) {
     deleted
       ? `Saved account removed.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> if you want to save another one.`
       : `You do not have a saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> to save one.`,
-    { reply_markup: commandKeyboardMarkup() },
+    { reply_markup: mainMenuInlineMarkup() },
   );
+}
+
+async function handleCallbackQuery(callbackQuery) {
+  const chatId = callbackQuery?.message?.chat?.id;
+  const userId = callbackQuery?.from?.id;
+  const data = callbackQuery?.data;
+  if (!chatId || !userId || !data) return;
+
+  await answerCallbackQuery(callbackQuery.id).catch((error) => {
+    console.warn(`Could not answer callback query: ${error.message}`);
+  });
+  await registerChat(chatId);
+
+  if (data === ACTION_MY_STATS) {
+    await handleMyStatsButton(chatId, userId);
+    return;
+  }
+
+  if (data === ACTION_CHECK_PLAYER) {
+    await sendCheckPrompt(chatId, userId, callbackQuery.message.chat, callbackQuery.message.message_id);
+    return;
+  }
+
+  if (data === ACTION_REWARDS) {
+    await sendValueReport(chatId);
+    return;
+  }
+
+  if (data === ACTION_SAVE_ACCOUNT) {
+    await sendSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, callbackQuery.message.message_id);
+    return;
+  }
+
+  if (data === ACTION_FORGET_ACCOUNT) {
+    await handleForgetSavedAccount(chatId, userId);
+    return;
+  }
+
+  if (data === ACTION_HELP) {
+    await sendWelcomeMessage(chatId);
+  }
 }
 
 async function handleCheckIdentity(chatId, userId, identity, session = null) {
@@ -3782,6 +3859,11 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
 }
 
 async function handleUpdate(update) {
+  if (update.callback_query) {
+    await handleCallbackQuery(update.callback_query);
+    return;
+  }
+
   const message = update.message;
   const chatId = message?.chat?.id;
   const userId = message?.from?.id;
@@ -3875,7 +3957,7 @@ async function pollingLoop() {
     const staleUpdates = await telegramRequest('getUpdates', {
       offset: -1,
       timeout: 0,
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'callback_query'],
     });
     const latestUpdate = Array.isArray(staleUpdates) ? staleUpdates.at(-1) : null;
     if (latestUpdate?.update_id !== undefined) {
@@ -3892,7 +3974,7 @@ async function pollingLoop() {
       const updates = await telegramRequest('getUpdates', {
         offset,
         timeout: 30,
-        allowed_updates: ['message'],
+        allowed_updates: ['message', 'callback_query'],
       });
 
       for (const update of updates) {

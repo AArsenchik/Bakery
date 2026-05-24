@@ -7,7 +7,6 @@ import {
   calculateDivisionPayoutBuckets,
   calculateGroupedScorePayout,
   calculateCookieValues,
-  commandKeyboardMarkup,
   conversationKeyForUpdate,
   createConversationScheduler,
   detectPayoutModel,
@@ -18,6 +17,7 @@ import {
   isHiddenStatsCommand,
   isHelpCommand,
   isValueCommand,
+  mainMenuInlineMarkup,
   renderHiddenStatsMessage,
   renderCheckReport,
   renderDivisionPayoutReport,
@@ -387,17 +387,17 @@ test('renders a welcome message with command descriptions', () => {
   assert.doesNotMatch(message, /statsss777/i);
 });
 
-test('builds a persistent command keyboard with saved account actions', () => {
-  const markup = commandKeyboardMarkup();
-  const labels = markup.keyboard.flat().map((button) => button.text);
+test('builds an inline menu with saved account actions', () => {
+  const markup = mainMenuInlineMarkup();
+  const labels = markup.inline_keyboard.flat().map((button) => button.text);
+  const callbackData = markup.inline_keyboard.flat().map((button) => button.callback_data);
 
-  assert.equal(markup.resize_keyboard, true);
-  assert.equal(markup.is_persistent, true);
   assert.ok(labels.includes('📊 My stats'));
   assert.ok(labels.includes('🔎 Check player'));
   assert.ok(labels.includes('🍪 Rewards'));
   assert.ok(labels.includes('💾 Save account'));
   assert.ok(labels.includes('🗑 Forget account'));
+  assert.ok(callbackData.every(Boolean));
 });
 
 test('builds Abstract profile override avatar URLs', () => {
