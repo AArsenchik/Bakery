@@ -7,6 +7,7 @@ import {
   calculateDivisionPayoutBuckets,
   calculateGroupedScorePayout,
   calculateCookieValues,
+  commandKeyboardMarkup,
   conversationKeyForUpdate,
   createConversationScheduler,
   detectPayoutModel,
@@ -382,7 +383,21 @@ test('renders a welcome message with command descriptions', () => {
   assert.match(message, /reward breakdown/i);
   assert.match(message, /\/ch/);
   assert.match(message, /profit\/loss/i);
+  assert.match(message, /My stats/i);
   assert.doesNotMatch(message, /statsss777/i);
+});
+
+test('builds a persistent command keyboard with saved account actions', () => {
+  const markup = commandKeyboardMarkup();
+  const labels = markup.keyboard.flat().map((button) => button.text);
+
+  assert.equal(markup.resize_keyboard, true);
+  assert.equal(markup.is_persistent, true);
+  assert.ok(labels.includes('📊 My stats'));
+  assert.ok(labels.includes('🔎 Check player'));
+  assert.ok(labels.includes('🍪 Rewards'));
+  assert.ok(labels.includes('💾 Save account'));
+  assert.ok(labels.includes('🗑 Forget account'));
 });
 
 test('builds Abstract profile override avatar URLs', () => {

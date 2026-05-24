@@ -86,6 +86,7 @@ const COOKIE_UNIT = 1000;
 const CACHE_FILE = new URL('../.cache/latest-report.json', import.meta.url);
 const CHECK_INDEX_FILE = new URL('../.cache/latest-check-index.json', import.meta.url);
 const CHAT_REGISTRY_FILE = new URL('../.cache/known-chats.json', import.meta.url);
+const SAVED_ACCOUNTS_FILE = new URL('../.cache/saved-accounts.json', import.meta.url);
 const BASELINE_CHAT_REGISTRY_FILE = new URL('../data/all-time-known-chats-baseline.json', import.meta.url);
 const BOT_LOCK_FILE = new URL('../.cache/bot.lock.json', import.meta.url);
 const CACHE_TTL_MS = 30_000;
@@ -111,6 +112,12 @@ const PAYOUT_MODEL_GROUPED_SCORE = 'grouped-score-top10';
 const GROUPED_SCORE_PLACEMENT_BUCKET_SHARE = 1;
 const GROUPED_SCORE_QUALIFIED_BAKERIES = 10;
 const GROUPED_SCORE_DAILY_GROWTH_PERCENT = 5;
+const BUTTON_MY_STATS = '📊 My stats';
+const BUTTON_CHECK_PLAYER = '🔎 Check player';
+const BUTTON_REWARDS = '🍪 Rewards';
+const BUTTON_SAVE_ACCOUNT = '💾 Save account';
+const BUTTON_FORGET_ACCOUNT = '🗑 Forget account';
+const BUTTON_HELP = 'ℹ️ Help';
 
 const MEDALS = ['🥇', '🥈', '🥉', '🏅', '🏅'];
 const checkSessions = new Map();
@@ -127,6 +134,7 @@ const seasonStartBlockCache = new Map();
 const processedUpdateIds = new Map();
 let knownChats = new Set();
 let baselineKnownChats = new Set();
+let savedAccounts = new Map();
 const execFileAsync = promisify(execFile);
 let botLockAcquired = false;
 
@@ -719,6 +727,51 @@ async function loadCheckIndexCache() {
 
 async function saveCheckIndexCache(index) {
   await writeCacheFile(CHECK_INDEX_FILE, serializeCheckIndex(index));
+}
+
+function normalizeSavedIdentity(identity) {
+  return String(identity ?? '').trim().slice(0, 120);
+}
+
+function savedAccountKey(userId) {
+  return String(userId);
+}
+
+async function loadSavedAccounts() {
+  const stored = await readCacheFile(SAVED_ACCOUNTS_FILE);
+  const entries = stored && typeof stored === 'object' && !Array.isArray(stored)
+    ? Object.entries(stored)
+    : [];
+  savedAccounts = new Map(entries.map(([userId, account]) => [String(userId), {
+    identity: normalizeSavedIdentity(account?.identity),
+    updatedAt: account?.updatedAt ?? null,
+  }]).filter(([, account]) => account.identity));
+}
+
+async function saveSavedAccounts() {
+  await writeCacheFile(SAVED_ACCOUNTS_FILE, Object.fromEntries([...savedAccounts.entries()].sort()));
+}
+
+function getSavedAccount(userId) {
+  return savedAccounts.get(savedAccountKey(userId)) ?? null;
+}
+
+async function setSavedAccount(userId, identity) {
+  const normalizedIdentity = normalizeSavedIdentity(identity);
+  if (!normalizedIdentity) throw new Error('Saved identity is empty');
+
+  savedAccounts.set(savedAccountKey(userId), {
+    identity: normalizedIdentity,
+    updatedAt: new Date().toISOString(),
+  });
+  await saveSavedAccounts();
+  return normalizedIdentity;
+}
+
+async function deleteSavedAccount(userId) {
+  const deleted = savedAccounts.delete(savedAccountKey(userId));
+  if (deleted) await saveSavedAccounts();
+  return deleted;
 }
 
 async function loadKnownChats() {
@@ -1877,9 +1930,32 @@ export function renderWelcomeMessage() {
   return [
     '<b>Rugpull Bakery Bot</b>',
     '',
+    `Tap <b>${BUTTON_MY_STATS}</b> after saving your account once.`,
+    '',
     '<b>/ch</b> - check a player\'s current season profit/loss',
     '<b>/cookie</b> - show the active season reward breakdown',
   ].join('\n');
+}
+
+export function commandKeyboardMarkup() {
+  return {
+    keyboard: [
+      [
+        { text: BUTTON_MY_STATS },
+        { text: BUTTON_CHECK_PLAYER },
+      ],
+      [
+        { text: BUTTON_REWARDS },
+        { text: BUTTON_SAVE_ACCOUNT },
+      ],
+      [
+        { text: BUTTON_FORGET_ACCOUNT },
+        { text: BUTTON_HELP },
+      ],
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+  };
 }
 
 export function renderHiddenStatsMessage(stats, generatedAt = new Date()) {
@@ -3407,16 +3483,36 @@ export function isValueCommand(text) {
   return ['/cookie', '/cookies', '/value', '/price'].includes(command);
 }
 
+function isRewardsButton(text) {
+  return String(text ?? '').trim() === BUTTON_REWARDS;
+}
+
 export function isHelpCommand(text) {
   if (!text) return false;
   const { command } = parseCommandText(text);
-  return ['/start', '/help'].includes(command);
+  return ['/start', '/help'].includes(command) || String(text).trim() === BUTTON_HELP;
 }
 
 export function isCheckCommand(text) {
   if (!text) return false;
   const { command } = parseCommandText(text);
   return command === '/ch';
+}
+
+function isCheckPlayerButton(text) {
+  return String(text ?? '').trim() === BUTTON_CHECK_PLAYER;
+}
+
+function isMyStatsButton(text) {
+  return String(text ?? '').trim() === BUTTON_MY_STATS;
+}
+
+function isSaveAccountButton(text) {
+  return String(text ?? '').trim() === BUTTON_SAVE_ACCOUNT;
+}
+
+function isForgetAccountButton(text) {
+  return String(text ?? '').trim() === BUTTON_FORGET_ACCOUNT;
 }
 
 export function isHiddenStatsCommand(text) {
@@ -3429,9 +3525,7 @@ async function sendWelcomeMessage(chatId) {
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
   await sendMessage(chatId, renderWelcomeMessage(), {
-    reply_markup: {
-      remove_keyboard: true,
-    },
+    reply_markup: commandKeyboardMarkup(),
   });
 }
 
@@ -3517,6 +3611,7 @@ async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
   });
 
   checkSessions.set(makeCheckSessionKey(chatId, userId), {
+    purpose: 'check',
     awaitingIdentity: true,
     userId,
     chatId,
@@ -3525,6 +3620,94 @@ async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
     isGroup: group,
     createdAtMs: Date.now(),
   });
+}
+
+async function sendSaveAccountPrompt(chatId, userId, chat, sourceMessageId) {
+  const group = isGroupChat(chat);
+  const promptLines = [
+    group
+      ? 'Reply to this message with <b>your</b> Rugpull Bakery username or wallet address.'
+      : 'Send <b>your</b> Rugpull Bakery username or wallet address.',
+    'I will remember it for your Telegram account.',
+    '',
+    `After that, tap <b>${BUTTON_MY_STATS}</b> anytime.`,
+  ];
+  const promptMessage = await sendMessage(chatId, promptLines.join('\n'), {
+    reply_to_message_id: sourceMessageId,
+    reply_markup: {
+      force_reply: true,
+      selective: true,
+      input_field_placeholder: 'your username or 0x...',
+    },
+  });
+
+  checkSessions.set(makeCheckSessionKey(chatId, userId), {
+    purpose: 'save-account',
+    awaitingIdentity: true,
+    userId,
+    chatId,
+    promptMessageId: promptMessage?.message_id ?? null,
+    sourceMessageId,
+    isGroup: group,
+    createdAtMs: Date.now(),
+  });
+}
+
+async function handleSaveAccountIdentity(chatId, userId, identity, session = null) {
+  const normalizedIdentity = normalizeSavedIdentity(identity);
+  if (!normalizedIdentity || normalizedIdentity.startsWith('/')) {
+    const retryPrompt = await sendMessage(chatId, 'Please send only your Rugpull Bakery username or wallet address.', {
+      reply_to_message_id: session?.promptMessageId ?? session?.sourceMessageId,
+      reply_markup: session?.isGroup
+        ? {
+            force_reply: true,
+            selective: true,
+            input_field_placeholder: 'your username or 0x...',
+          }
+        : undefined,
+    });
+    if (session) {
+      checkSessions.set(makeCheckSessionKey(chatId, userId), {
+        ...session,
+        promptMessageId: retryPrompt?.message_id ?? session.promptMessageId,
+        createdAtMs: Date.now(),
+      });
+    }
+    return;
+  }
+
+  await setSavedAccount(userId, normalizedIdentity);
+  if (session) checkSessions.delete(makeCheckSessionKey(chatId, userId));
+  await sendMessage(
+    chatId,
+    `Saved account: <code>${escapeHtml(normalizedIdentity)}</code>\n\nTap <b>${BUTTON_MY_STATS}</b> to check it without typing again.`,
+    { reply_markup: commandKeyboardMarkup() },
+  );
+}
+
+async function handleMyStatsButton(chatId, userId) {
+  const saved = getSavedAccount(userId);
+  if (!saved?.identity) {
+    await sendMessage(
+      chatId,
+      `No saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> and send your Rugpull Bakery username or wallet address once.`,
+      { reply_markup: commandKeyboardMarkup() },
+    );
+    return;
+  }
+
+  await handleCheckIdentity(chatId, userId, saved.identity);
+}
+
+async function handleForgetSavedAccount(chatId, userId) {
+  const deleted = await deleteSavedAccount(userId);
+  await sendMessage(
+    chatId,
+    deleted
+      ? `Saved account removed.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> if you want to save another one.`
+      : `You do not have a saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> to save one.`,
+    { reply_markup: commandKeyboardMarkup() },
+  );
 }
 
 async function handleCheckIdentity(chatId, userId, identity, session = null) {
@@ -3612,13 +3795,33 @@ async function handleUpdate(update) {
     return;
   }
 
-  if (isValueCommand(text)) {
+  if (isValueCommand(text) || isRewardsButton(text)) {
     await sendValueReport(chatId);
     return;
   }
 
   if (isHiddenStatsCommand(text)) {
     await sendHiddenStats(chatId);
+    return;
+  }
+
+  if (isMyStatsButton(text)) {
+    await handleMyStatsButton(chatId, userId);
+    return;
+  }
+
+  if (isSaveAccountButton(text)) {
+    await sendSaveAccountPrompt(chatId, userId, message.chat, message.message_id);
+    return;
+  }
+
+  if (isForgetAccountButton(text)) {
+    await handleForgetSavedAccount(chatId, userId);
+    return;
+  }
+
+  if (isCheckPlayerButton(text)) {
+    await sendCheckPrompt(chatId, userId, message.chat, message.message_id);
     return;
   }
 
@@ -3635,7 +3838,11 @@ async function handleUpdate(update) {
 
   const session = cleanExpiredCheckSession(chatId, userId);
   if (session?.awaitingIdentity && shouldAcceptCheckIdentityMessage(session, message)) {
-    await handleCheckIdentity(chatId, userId, text, session);
+    if (session.purpose === 'save-account') {
+      await handleSaveAccountIdentity(chatId, userId, text, session);
+    } else {
+      await handleCheckIdentity(chatId, userId, text, session);
+    }
   }
 }
 
@@ -3658,6 +3865,7 @@ async function pollingLoop() {
   await loadCheckIndexCache();
   await loadKnownChats();
   await loadBaselineKnownChats();
+  await loadSavedAccounts();
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
   setInterval(refreshReportCacheInBackground, CACHE_TTL_MS).unref();

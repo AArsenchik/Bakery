@@ -36,6 +36,14 @@ npm start
 /ch
 ```
 
+Кнопки в Telegram:
+
+- `📊 My stats` - показывает статистику сохраненного аккаунта.
+- `🔎 Check player` - просит username/address и проверяет любого игрока.
+- `🍪 Rewards` - показывает текущий reward breakdown сезона.
+- `💾 Save account` - сохраняет username/address за Telegram user id.
+- `🗑 Forget account` - удаляет сохраненный аккаунт.
+
 ## Команда `/ch`
 
 Сценарий:
@@ -56,6 +64,7 @@ npm start
 - `/ch` сейчас считает по активному сезону.
 - В группах бот ждет ответ только от того пользователя, который вызвал `/ch`, и безопаснее всего отвечать reply на prompt бота.
 - Можно сразу отправить `/ch username` или `/ch 0x...` в одном сообщении.
+- Чтобы не вводить username каждый раз, нажми `💾 Save account` один раз, а потом используй `📊 My stats`.
 - В Season 5/6 `/ch` считает estimated reward только для top-10 bakeries: `bakery score / top-10 score * prize pool`, затем `member score / bakery score`.
 - Season 6 использует score как reward metric, не raw cookies: score растет от cookies baked с daily scaler `+5%` за день сезона.
 - Season 6 rewards могут меняться до конца сезона, потому что score share постоянно меняется.
