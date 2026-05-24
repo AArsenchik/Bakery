@@ -4013,65 +4013,74 @@ async function handleCallbackQuery(callbackQuery) {
   });
   await registerChat(chatId);
 
-  if (!canEditAsText) {
+  try {
+    if (!canEditAsText) {
+      if (data === ACTION_BACK_MAIN || data === ACTION_HELP) {
+        await sendWelcomeMessage(chatId);
+        return;
+      }
+
+      if (data === ACTION_MY_STATS) {
+        await handleMyStatsButton(chatId, userId);
+        return;
+      }
+
+      if (data === ACTION_CHECK_PLAYER) {
+        await sendCheckPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+        return;
+      }
+
+      if (data === ACTION_REWARDS) {
+        await sendValueReport(chatId);
+        return;
+      }
+
+      if (data === ACTION_SAVE_ACCOUNT) {
+        await sendSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+        return;
+      }
+
+      if (data === ACTION_FORGET_ACCOUNT) {
+        await handleForgetSavedAccount(chatId, userId);
+      }
+      return;
+    }
+
     if (data === ACTION_BACK_MAIN || data === ACTION_HELP) {
-      await sendWelcomeMessage(chatId);
+      await editMenuMessage(chatId, messageId, renderWelcomeMessage(), mainMenuInlineMarkup());
       return;
     }
 
     if (data === ACTION_MY_STATS) {
-      await handleMyStatsButton(chatId, userId);
+      await handleMyStatsButton(chatId, userId, messageId);
       return;
     }
 
     if (data === ACTION_CHECK_PLAYER) {
-      await sendCheckPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+      await editCheckPrompt(chatId, userId, callbackQuery.message.chat, messageId);
       return;
     }
 
     if (data === ACTION_REWARDS) {
-      await sendValueReport(chatId);
+      await editValueReport(chatId, messageId);
       return;
     }
 
     if (data === ACTION_SAVE_ACCOUNT) {
-      await sendSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+      await editSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, messageId);
       return;
     }
 
     if (data === ACTION_FORGET_ACCOUNT) {
-      await handleForgetSavedAccount(chatId, userId);
+      await handleForgetSavedAccount(chatId, userId, messageId);
     }
-    return;
-  }
-
-  if (data === ACTION_BACK_MAIN || data === ACTION_HELP) {
-    await editMenuMessage(chatId, messageId, renderWelcomeMessage(), mainMenuInlineMarkup());
-    return;
-  }
-
-  if (data === ACTION_MY_STATS) {
-    await handleMyStatsButton(chatId, userId, messageId);
-    return;
-  }
-
-  if (data === ACTION_CHECK_PLAYER) {
-    await editCheckPrompt(chatId, userId, callbackQuery.message.chat, messageId);
-    return;
-  }
-
-  if (data === ACTION_REWARDS) {
-    await editValueReport(chatId, messageId);
-    return;
-  }
-
-  if (data === ACTION_SAVE_ACCOUNT) {
-    await editSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, messageId);
-    return;
-  }
-
-  if (data === ACTION_FORGET_ACCOUNT) {
-    await handleForgetSavedAccount(chatId, userId, messageId);
+  } catch (error) {
+    console.warn(`Could not handle inline menu action ${data}: ${error.message}`);
+    await sendMessage(chatId, 'Could not update this menu. Here is a fresh one:', {
+      reply_markup: mainMenuInlineMarkup(),
+    }).catch((sendError) => {
+      console.warn(`Could not send fallback menu: ${sendError.message}`);
+    });
   }
 }
 
