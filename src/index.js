@@ -124,6 +124,7 @@ const ACTION_REWARDS = 'rewards';
 const ACTION_SAVE_ACCOUNT = 'save_account';
 const ACTION_FORGET_ACCOUNT = 'forget_account';
 const ACTION_HELP = 'help';
+const ACTION_BACK_MAIN = 'back_main';
 
 const MEDALS = ['🥇', '🥈', '🥉', '🏅', '🏅'];
 const checkSessions = new Map();
@@ -1962,6 +1963,29 @@ export function mainMenuInlineMarkup() {
   };
 }
 
+function backToMainInlineMarkup() {
+  return {
+    inline_keyboard: [
+      [
+        { text: '‹ Back', callback_data: ACTION_BACK_MAIN },
+      ],
+    ],
+  };
+}
+
+function noSavedAccountInlineMarkup() {
+  return {
+    inline_keyboard: [
+      [
+        { text: BUTTON_SAVE_ACCOUNT, callback_data: ACTION_SAVE_ACCOUNT },
+      ],
+      [
+        { text: '‹ Back', callback_data: ACTION_BACK_MAIN },
+      ],
+    ],
+  };
+}
+
 export function renderHiddenStatsMessage(stats, generatedAt = new Date()) {
   return [
     '<b>Bot Stats</b>',
@@ -3289,6 +3313,41 @@ async function sendMessage(chatId, text, extra = {}) {
   });
 }
 
+async function editMessageText(chatId, messageId, text, extra = {}) {
+  return telegramRequest('editMessageText', {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    parse_mode: 'HTML',
+    disable_web_page_preview: true,
+    ...extra,
+  });
+}
+
+async function editMenuMessage(chatId, messageId, text, replyMarkup = mainMenuInlineMarkup()) {
+  try {
+    return await editMessageText(chatId, messageId, text, {
+      reply_markup: replyMarkup,
+    });
+  } catch (error) {
+    if (String(error.message).includes('message is not modified')) return null;
+    throw error;
+  }
+}
+
+function withDefaultReplyMarkup(extra = {}, replyMarkup = mainMenuInlineMarkup()) {
+  const hasExplicitMarkup = Object.prototype.hasOwnProperty.call(extra, 'reply_markup');
+  const cleanedExtra = Object.fromEntries(
+    Object.entries(extra).filter(([, value]) => value !== undefined && value !== null),
+  );
+
+  if (hasExplicitMarkup) return cleanedExtra;
+  return {
+    reply_markup: replyMarkup,
+    ...cleanedExtra,
+  };
+}
+
 async function answerCallbackQuery(callbackQueryId, text = null) {
   return telegramRequest('answerCallbackQuery', {
     callback_query_id: callbackQueryId,
@@ -3447,18 +3506,12 @@ async function getRenderedStatCardBuffer(cacheKey, cardData) {
 
 async function sendCheckResult(chatId, result, extra = {}) {
   if (!result?.cardData) {
-    await sendMessage(chatId, result.text, {
-      reply_markup: mainMenuInlineMarkup(),
-      ...extra,
-    });
+    await sendMessage(chatId, result.text, withDefaultReplyMarkup(extra));
     return;
   }
 
   try {
-    const photoExtra = {
-      reply_markup: mainMenuInlineMarkup(),
-      ...extra,
-    };
+    const photoExtra = withDefaultReplyMarkup(extra);
     const cacheKey = statCardCacheKey(result.cardData);
     const cachedPhoto = getStatCardPhotoCacheEntry(cacheKey);
 
@@ -3482,7 +3535,7 @@ async function sendCheckResult(chatId, result, extra = {}) {
     }
   } catch (error) {
     console.warn(`Could not render/send stat card: ${error.message}`);
-    await sendMessage(chatId, result.text, extra);
+    await sendMessage(chatId, result.text, withDefaultReplyMarkup(extra));
   }
 }
 
@@ -3623,8 +3676,39 @@ async function sendValueReport(chatId) {
   }
 }
 
-async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
-  refreshCheckIndexInBackground();
+async function editValueReport(chatId, messageId) {
+  try {
+    await editMenuMessage(chatId, messageId, '<b>Rewards</b>\n\nLoading live reward breakdown...', backToMainInlineMarkup());
+
+    if (isCacheFresh(reportCache)) {
+      await editMenuMessage(chatId, messageId, reportCache.text, mainMenuInlineMarkup());
+      refreshReportCacheInBackground();
+      return;
+    }
+
+    if (isCacheUsable(reportCache)) {
+      await editMenuMessage(
+        chatId,
+        messageId,
+        `${reportCache.text}\n\n<i>Refreshing live data in the background.</i>`,
+        mainMenuInlineMarkup(),
+      );
+      refreshReportCacheInBackground();
+      return;
+    }
+
+    const cache = await refreshReportCache();
+    await editMenuMessage(chatId, messageId, cache.text, mainMenuInlineMarkup());
+  } catch (error) {
+    console.error(error);
+    const message = reportCache?.text
+      ? `${reportCache.text}\n\n<i>Live refresh failed, showing the latest cached report.</i>`
+      : 'Could not calculate cookie value right now. Please try again in a few seconds.';
+    await editMenuMessage(chatId, messageId, message, mainMenuInlineMarkup());
+  }
+}
+
+function checkPromptText(chat) {
   const group = isGroupChat(chat);
   const promptLines = [
     group
@@ -3636,8 +3720,13 @@ async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
     'Inside a qualified bakery, reward is split by each member score contribution.',
     'Costs use exact on-chain bake fees when available.',
   ];
-  const promptText = promptLines.join('\n');
-  const promptMessage = await sendMessage(chatId, promptText, {
+  return promptLines.join('\n');
+}
+
+async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
+  refreshCheckIndexInBackground();
+  const group = isGroupChat(chat);
+  const promptMessage = await sendMessage(chatId, checkPromptText(chat), {
     reply_to_message_id: sourceMessageId,
     reply_markup: {
       force_reply: true,
@@ -3658,7 +3747,24 @@ async function sendCheckPrompt(chatId, userId, chat, sourceMessageId) {
   });
 }
 
-async function sendSaveAccountPrompt(chatId, userId, chat, sourceMessageId) {
+async function editCheckPrompt(chatId, userId, chat, messageId) {
+  refreshCheckIndexInBackground();
+  await editMenuMessage(chatId, messageId, checkPromptText(chat), backToMainInlineMarkup());
+
+  checkSessions.set(makeCheckSessionKey(chatId, userId), {
+    purpose: 'check',
+    awaitingIdentity: true,
+    userId,
+    chatId,
+    promptMessageId: messageId,
+    sourceMessageId: messageId,
+    isGroup: isGroupChat(chat),
+    isMenuSession: true,
+    createdAtMs: Date.now(),
+  });
+}
+
+function saveAccountPromptText(chat) {
   const group = isGroupChat(chat);
   const promptLines = [
     group
@@ -3668,7 +3774,12 @@ async function sendSaveAccountPrompt(chatId, userId, chat, sourceMessageId) {
     '',
     `After that, tap <b>${BUTTON_MY_STATS}</b> anytime.`,
   ];
-  const promptMessage = await sendMessage(chatId, promptLines.join('\n'), {
+  return promptLines.join('\n');
+}
+
+async function sendSaveAccountPrompt(chatId, userId, chat, sourceMessageId) {
+  const group = isGroupChat(chat);
+  const promptMessage = await sendMessage(chatId, saveAccountPromptText(chat), {
     reply_to_message_id: sourceMessageId,
     reply_markup: {
       force_reply: true,
@@ -3689,9 +3800,39 @@ async function sendSaveAccountPrompt(chatId, userId, chat, sourceMessageId) {
   });
 }
 
+async function editSaveAccountPrompt(chatId, userId, chat, messageId) {
+  await editMenuMessage(chatId, messageId, saveAccountPromptText(chat), backToMainInlineMarkup());
+
+  checkSessions.set(makeCheckSessionKey(chatId, userId), {
+    purpose: 'save-account',
+    awaitingIdentity: true,
+    userId,
+    chatId,
+    promptMessageId: messageId,
+    sourceMessageId: messageId,
+    isGroup: isGroupChat(chat),
+    isMenuSession: true,
+    createdAtMs: Date.now(),
+  });
+}
+
 async function handleSaveAccountIdentity(chatId, userId, identity, session = null) {
   const normalizedIdentity = normalizeSavedIdentity(identity);
   if (!normalizedIdentity || normalizedIdentity.startsWith('/')) {
+    if (session?.isMenuSession && session.promptMessageId) {
+      await editMenuMessage(
+        chatId,
+        session.promptMessageId,
+        'Please send only your Rugpull Bakery username or wallet address.',
+        backToMainInlineMarkup(),
+      );
+      checkSessions.set(makeCheckSessionKey(chatId, userId), {
+        ...session,
+        createdAtMs: Date.now(),
+      });
+      return;
+    }
+
     const retryPrompt = await sendMessage(chatId, 'Please send only your Rugpull Bakery username or wallet address.', {
       reply_to_message_id: session?.promptMessageId ?? session?.sourceMessageId,
       reply_markup: session?.isGroup
@@ -3714,94 +3855,86 @@ async function handleSaveAccountIdentity(chatId, userId, identity, session = nul
 
   await setSavedAccount(userId, normalizedIdentity);
   if (session) checkSessions.delete(makeCheckSessionKey(chatId, userId));
-  await sendMessage(
-    chatId,
-    `Saved account: <code>${escapeHtml(normalizedIdentity)}</code>\n\nTap <b>${BUTTON_MY_STATS}</b> to check it without typing again.`,
-    { reply_markup: mainMenuInlineMarkup() },
-  );
+  const message = `Saved account: <code>${escapeHtml(normalizedIdentity)}</code>\n\nTap <b>${BUTTON_MY_STATS}</b> to check it without typing again.`;
+  if (session?.promptMessageId) {
+    await editMenuMessage(chatId, session.promptMessageId, message, mainMenuInlineMarkup()).catch(async () => {
+      await sendMessage(chatId, message, { reply_markup: mainMenuInlineMarkup() });
+    });
+    return;
+  }
+
+  await sendMessage(chatId, message, { reply_markup: mainMenuInlineMarkup() });
 }
 
-async function handleMyStatsButton(chatId, userId) {
+async function handleMyStatsButton(chatId, userId, messageId = null) {
   const saved = getSavedAccount(userId);
   if (!saved?.identity) {
-    await sendMessage(
+    const message = `No saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> and send your Rugpull Bakery username or wallet address once.`;
+    if (messageId) {
+      await editMenuMessage(chatId, messageId, message, noSavedAccountInlineMarkup());
+    } else {
+      await sendMessage(chatId, message, { reply_markup: noSavedAccountInlineMarkup() });
+    }
+    return;
+  }
+
+  if (messageId) {
+    await editMenuMessage(
       chatId,
-      `No saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> and send your Rugpull Bakery username or wallet address once.`,
-      { reply_markup: mainMenuInlineMarkup() },
+      messageId,
+      `<b>My stats</b>\n\nCalculating stats for <code>${escapeHtml(saved.identity)}</code>...`,
+      backToMainInlineMarkup(),
     );
-    return;
   }
 
-  await handleCheckIdentity(chatId, userId, saved.identity);
-}
-
-async function handleForgetSavedAccount(chatId, userId) {
-  const deleted = await deleteSavedAccount(userId);
-  await sendMessage(
-    chatId,
-    deleted
-      ? `Saved account removed.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> if you want to save another one.`
-      : `You do not have a saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> to save one.`,
-    { reply_markup: mainMenuInlineMarkup() },
-  );
-}
-
-async function handleCallbackQuery(callbackQuery) {
-  const chatId = callbackQuery?.message?.chat?.id;
-  const userId = callbackQuery?.from?.id;
-  const data = callbackQuery?.data;
-  if (!chatId || !userId || !data) return;
-
-  await answerCallbackQuery(callbackQuery.id).catch((error) => {
-    console.warn(`Could not answer callback query: ${error.message}`);
+  await handleCheckIdentity(chatId, userId, saved.identity, null, {
+    progressMessage: !messageId,
+    resultExtra: messageId ? { reply_markup: null } : {},
+    onSuccess: messageId
+      ? () => editMenuMessage(chatId, messageId, '<b>My stats</b>\n\nDone. The stat card was sent below.', mainMenuInlineMarkup())
+      : null,
+    onFailure: messageId
+      ? (result) => editMenuMessage(chatId, messageId, result.message, noSavedAccountInlineMarkup())
+      : null,
+    onError: messageId
+      ? () => editMenuMessage(chatId, messageId, 'I could not calculate your stats right now. Please try again in a few seconds.', mainMenuInlineMarkup())
+      : null,
   });
-  await registerChat(chatId);
+}
 
-  if (data === ACTION_MY_STATS) {
-    await handleMyStatsButton(chatId, userId);
-    return;
-  }
+async function handleForgetSavedAccount(chatId, userId, messageId = null) {
+  const deleted = await deleteSavedAccount(userId);
+  const message = deleted
+    ? `Saved account removed.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> if you want to save another one.`
+    : `You do not have a saved account yet.\n\nTap <b>${BUTTON_SAVE_ACCOUNT}</b> to save one.`;
 
-  if (data === ACTION_CHECK_PLAYER) {
-    await sendCheckPrompt(chatId, userId, callbackQuery.message.chat, callbackQuery.message.message_id);
-    return;
-  }
-
-  if (data === ACTION_REWARDS) {
-    await sendValueReport(chatId);
-    return;
-  }
-
-  if (data === ACTION_SAVE_ACCOUNT) {
-    await sendSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, callbackQuery.message.message_id);
-    return;
-  }
-
-  if (data === ACTION_FORGET_ACCOUNT) {
-    await handleForgetSavedAccount(chatId, userId);
-    return;
-  }
-
-  if (data === ACTION_HELP) {
-    await sendWelcomeMessage(chatId);
+  if (messageId) {
+    await editMenuMessage(chatId, messageId, message, deleted ? mainMenuInlineMarkup() : noSavedAccountInlineMarkup());
+  } else {
+    await sendMessage(chatId, message, { reply_markup: deleted ? mainMenuInlineMarkup() : noSavedAccountInlineMarkup() });
   }
 }
 
-async function handleCheckIdentity(chatId, userId, identity, session = null) {
+async function handleCheckIdentity(chatId, userId, identity, session = null, options = {}) {
   const normalizedIdentity = String(identity).trim().toLowerCase();
   const cached = checkReportCache.get(normalizedIdentity);
   if (cached && Date.now() - cached.generatedAtMs <= CHECK_REPORT_TTL_MS) {
     if (session) checkSessions.delete(makeCheckSessionKey(chatId, userId));
-    await sendCheckResult(chatId, cached.result);
+    await sendCheckResult(chatId, cached.result, options.resultExtra ?? {});
+    if (options.onSuccess) await options.onSuccess(cached.result);
     return;
   }
 
   let progressMessage = null;
-  const progressMessagePromise = sendProgressMessage(chatId).then((message) => {
-    progressMessage = message;
-    return message;
-  });
+  const useProgressMessage = options.progressMessage !== false;
+  const progressMessagePromise = useProgressMessage
+    ? sendProgressMessage(chatId).then((message) => {
+        progressMessage = message;
+        return message;
+      })
+    : Promise.resolve(null);
   const cleanupProgressMessage = () => {
+    if (!useProgressMessage) return;
     if (progressMessage) {
       deleteProgressMessage(chatId, progressMessage);
       return;
@@ -3822,6 +3955,10 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
     const result = await resultPromise;
     if (!result.ok) {
       cleanupProgressMessage();
+      if (options.onFailure) {
+        await options.onFailure(result);
+        return;
+      }
       if (session) {
         const retryPrompt = await sendMessage(chatId, `${result.message}\n\n<i>Reply to this message and try again.</i>`, {
           reply_to_message_id: session.promptMessageId ?? session.sourceMessageId,
@@ -3849,12 +3986,92 @@ async function handleCheckIdentity(chatId, userId, identity, session = null) {
       result,
       generatedAtMs: Date.now(),
     });
-    await sendCheckResult(chatId, result);
+    await sendCheckResult(chatId, result, options.resultExtra ?? {});
     cleanupProgressMessage();
+    if (options.onSuccess) await options.onSuccess(result);
   } catch (error) {
     console.error(error);
     cleanupProgressMessage();
+    if (options.onError) {
+      await options.onError(error);
+      return;
+    }
     await sendMessage(chatId, 'I could not calculate /ch right now. Please try again in a few seconds.');
+  }
+}
+
+async function handleCallbackQuery(callbackQuery) {
+  const chatId = callbackQuery?.message?.chat?.id;
+  const userId = callbackQuery?.from?.id;
+  const data = callbackQuery?.data;
+  const messageId = callbackQuery?.message?.message_id;
+  if (!chatId || !userId || !data || !messageId) return;
+  const canEditAsText = Boolean(callbackQuery.message?.text);
+
+  await answerCallbackQuery(callbackQuery.id).catch((error) => {
+    console.warn(`Could not answer callback query: ${error.message}`);
+  });
+  await registerChat(chatId);
+
+  if (!canEditAsText) {
+    if (data === ACTION_BACK_MAIN || data === ACTION_HELP) {
+      await sendWelcomeMessage(chatId);
+      return;
+    }
+
+    if (data === ACTION_MY_STATS) {
+      await handleMyStatsButton(chatId, userId);
+      return;
+    }
+
+    if (data === ACTION_CHECK_PLAYER) {
+      await sendCheckPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+      return;
+    }
+
+    if (data === ACTION_REWARDS) {
+      await sendValueReport(chatId);
+      return;
+    }
+
+    if (data === ACTION_SAVE_ACCOUNT) {
+      await sendSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+      return;
+    }
+
+    if (data === ACTION_FORGET_ACCOUNT) {
+      await handleForgetSavedAccount(chatId, userId);
+    }
+    return;
+  }
+
+  if (data === ACTION_BACK_MAIN || data === ACTION_HELP) {
+    await editMenuMessage(chatId, messageId, renderWelcomeMessage(), mainMenuInlineMarkup());
+    return;
+  }
+
+  if (data === ACTION_MY_STATS) {
+    await handleMyStatsButton(chatId, userId, messageId);
+    return;
+  }
+
+  if (data === ACTION_CHECK_PLAYER) {
+    await editCheckPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+    return;
+  }
+
+  if (data === ACTION_REWARDS) {
+    await editValueReport(chatId, messageId);
+    return;
+  }
+
+  if (data === ACTION_SAVE_ACCOUNT) {
+    await editSaveAccountPrompt(chatId, userId, callbackQuery.message.chat, messageId);
+    return;
+  }
+
+  if (data === ACTION_FORGET_ACCOUNT) {
+    await handleForgetSavedAccount(chatId, userId, messageId);
   }
 }
 
@@ -3923,7 +4140,41 @@ async function handleUpdate(update) {
     if (session.purpose === 'save-account') {
       await handleSaveAccountIdentity(chatId, userId, text, session);
     } else {
-      await handleCheckIdentity(chatId, userId, text, session);
+      if (session.isMenuSession && session.promptMessageId) {
+        await editMenuMessage(
+          chatId,
+          session.promptMessageId,
+          `<b>Check player</b>\n\nCalculating stats for <code>${escapeHtml(text)}</code>...`,
+          backToMainInlineMarkup(),
+        ).catch((error) => {
+          console.warn(`Could not update inline check screen: ${error.message}`);
+        });
+      }
+
+      await handleCheckIdentity(chatId, userId, text, session, session.isMenuSession
+        ? {
+            progressMessage: false,
+            resultExtra: { reply_markup: null },
+            onSuccess: () => editMenuMessage(
+              chatId,
+              session.promptMessageId,
+              '<b>Check player</b>\n\nDone. The stat card was sent below.',
+              mainMenuInlineMarkup(),
+            ),
+            onFailure: (result) => editMenuMessage(
+              chatId,
+              session.promptMessageId,
+              `${result.message}\n\nSend another username or wallet address to try again.`,
+              backToMainInlineMarkup(),
+            ),
+            onError: () => editMenuMessage(
+              chatId,
+              session.promptMessageId,
+              'I could not calculate /ch right now. Please try again in a few seconds.',
+              mainMenuInlineMarkup(),
+            ),
+          }
+        : {});
     }
   }
 }
