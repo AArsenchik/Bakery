@@ -75,7 +75,7 @@ Inline-кнопки в Telegram:
 - В solo-сезонах `/ch` считает leaderboard reward по текущему rank игрока.
 - В division-сезоне `/ch` определяет bakery division (`Standard` или `Open`) и считает leaderboard reward по актуальной payout table этой division.
 - `Cook tx` считается по on-chain `Bake`-логам bakery-контракта для адреса и сезона.
-- `Gas cost` считается по реальным on-chain fee через `zks_getTransactionDetails`/receipts. Для больших аккаунтов бот использует sample реальных fee, чтобы не забивать RPC десятками тысяч запросов и не ставить пользователей в длинную очередь.
+- `Gas cost` считается как точная сумма реальной fee каждой найденной `Bake`-транзакции через `zks_getTransactionDetails`/receipts.
 - Если точные fee временно недоступны, бот показывает `N/A`, а не подставляет приблизительную сумму.
 - Если генерация или отправка картинки не удалась, бот автоматически делает fallback на текстовое сообщение.
 

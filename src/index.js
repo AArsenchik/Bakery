@@ -107,8 +107,6 @@ const PROCESSED_UPDATE_TTL_MS = 10 * 60_000;
 const DEFAULT_TELEGRAM_REQUEST_TIMEOUT_MS = 15_000;
 const DEFAULT_TELEGRAM_UPLOAD_TIMEOUT_MS = 45_000;
 const TELEGRAM_LONG_POLL_GRACE_MS = 5_000;
-const DEFAULT_EXACT_GAS_FULL_TX_LIMIT = 800;
-const DEFAULT_EXACT_GAS_INCREMENTAL_TX_LIMIT = 250;
 const HIDDEN_STATS_COMMAND = '/statsss777';
 const MOSCOW_TIME_ZONE = 'Europe/Moscow';
 const PAYOUT_MODEL_LEGACY = 'legacy-top5';
@@ -1376,17 +1374,6 @@ function bakeTxFeeEth() {
   return toNumber(env('BAKE_TX_FEE_ETH', String(DEFAULT_BAKE_TX_FEE_ETH)), 'BAKE_TX_FEE_ETH');
 }
 
-function exactGasFullTxLimit() {
-  return toNumber(env('EXACT_GAS_FULL_TX_LIMIT', String(DEFAULT_EXACT_GAS_FULL_TX_LIMIT)), 'EXACT_GAS_FULL_TX_LIMIT');
-}
-
-function exactGasIncrementalTxLimit() {
-  return toNumber(
-    env('EXACT_GAS_INCREMENTAL_TX_LIMIT', String(DEFAULT_EXACT_GAS_INCREMENTAL_TX_LIMIT)),
-    'EXACT_GAS_INCREMENTAL_TX_LIMIT',
-  );
-}
-
 function allowApproxGasFallback() {
   return String(env('ALLOW_APPROX_GAS_FALLBACK', 'false')).toLowerCase() === 'true';
 }
@@ -2554,15 +2541,6 @@ export function gasSpentEthFromTxStats(txStats) {
   return Number.isFinite(txStats?.gasSpentEth) ? txStats.gasSpentEth : null;
 }
 
-async function deriveSampledBakeTxStats({ rpcHttp, transactionHashes, cachedValue = null }) {
-  const averageFeeEth = await fetchAverageBakeFeeEth(rpcHttp, transactionHashes);
-  return deriveApproxBakeTxStats({
-    transactionHashes,
-    cachedValue,
-    averageFeeEth,
-  });
-}
-
 async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, bakeryContract }) {
   const cacheKey = `${String(address).toLowerCase()}:${seasonId}`;
   const cached = checkStatsCache.get(cacheKey);
@@ -2590,34 +2568,10 @@ async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, b
 
       if (!newHashes.length) {
         gasSpentEth = cachedValue.gasSpentEth;
-      } else if (newHashes.length > exactGasIncrementalTxLimit()) {
-        const value = await deriveSampledBakeTxStats({
-          rpcHttp,
-          transactionHashes,
-          cachedValue,
-        });
-
-        checkStatsCache.set(cacheKey, {
-          value,
-          generatedAtMs: Date.now(),
-        });
-        return value;
       } else {
         const incrementalFeeEth = await fetchTotalBakeFeeEth(rpcHttp, newHashes);
         gasSpentEth = cachedValue.gasSpentEth + incrementalFeeEth;
       }
-    } else if (transactionHashes.length > exactGasFullTxLimit()) {
-      const value = await deriveSampledBakeTxStats({
-        rpcHttp,
-        transactionHashes,
-        cachedValue,
-      });
-
-      checkStatsCache.set(cacheKey, {
-        value,
-        generatedAtMs: Date.now(),
-      });
-      return value;
     } else {
       gasSpentEth = await fetchTotalBakeFeeEth(rpcHttp, transactionHashes);
     }
