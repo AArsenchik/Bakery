@@ -203,6 +203,54 @@ test('renders a grouped score payout report for season 6', () => {
   assert.match(report, /Random events: Rush Order \+10%\/60m; Golden Batch \+20%\/45m/);
 });
 
+test('renders a grouped score payout report for season 7 without daily score scaler', () => {
+  const report = renderGroupedScorePayoutReport({
+    agent: {
+      liveState: {
+        marketingSeason: 7,
+        gameplayCaps: {
+          clanMemberCap: 50,
+          bakeryTiers: [
+            { tierId: 1, name: 'Grouped', enabled: true, bakeCooldownBlocks: 5 },
+            { tierId: 2, name: 'Open', enabled: true, bakeCooldownBlocks: 1 },
+          ],
+        },
+      },
+      coreMechanics: {
+        leaderboardsAndPayouts: {
+          scoreFormula: 'score = cookiesBaked * 1.00 for newly projected bakes; no daily score scaler is applied.',
+          scoreSharePlacementPool: {
+            marketingSeason: 7,
+            prizePoolShareBps: 10000,
+            qualifiedBakeryCount: 10,
+            fixedRankPercentages: false,
+          },
+        },
+        bakeryUpgrades: {
+          upgradeDefinitions: [
+            { name: 'Upgraded Oven' },
+            { name: 'Propaganda Office' },
+          ],
+        },
+        randomEvents: {
+          eventPool: [
+            { name: 'Rush Order', multiplierBps: 11000, durationSeconds: 3600 },
+          ],
+        },
+      },
+    },
+    season: { id: 9, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+    generatedAt: new Date('2026-05-28T10:00:00.000Z'),
+  });
+
+  assert.match(report, /Season 7 payout/);
+  assert.match(report, /Score = cookies baked \* 1\.00/);
+  assert.doesNotMatch(report, /grows \+5% per season day/);
+  assert.match(report, /Player skills can change gameplay output/);
+  assert.match(report, /Ecosystem reward drawings are separate from the ETH prize pool/);
+});
+
 test('prefers division payout model over solo fallback for season 4-style data', () => {
   const payoutModel = detectPayoutModel(
     { liveState: { gameplayCaps: { cookieScale: 10000 } } },
@@ -256,6 +304,32 @@ test('prefers grouped score payout model for season 6 live data', () => {
       },
     },
     { id: 8 },
+    [{ id: 123, memberCount: 34, tierId: 1, score: '0' }],
+  );
+
+  assert.equal(payoutModel, 'grouped-score-top10');
+});
+
+test('prefers grouped score payout model for season 7 live data', () => {
+  const payoutModel = detectPayoutModel(
+    {
+      liveState: {
+        marketingSeason: 7,
+        gameplayCaps: {
+          clanMemberCap: 50,
+          bakeryTiers: [
+            { tierId: 1, name: 'Grouped', enabled: true, bakeCooldownBlocks: 5 },
+            { tierId: 2, name: 'Open', enabled: true, bakeCooldownBlocks: 1 },
+          ],
+        },
+      },
+      coreMechanics: {
+        leaderboardsAndPayouts: {
+          scoreSharePlacementPool: { marketingSeason: 7, qualifiedBakeryCount: 10 },
+        },
+      },
+    },
+    { id: 9 },
     [{ id: 123, memberCount: 34, tierId: 1, score: '0' }],
   );
 

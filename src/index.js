@@ -10,7 +10,7 @@ const DEFAULT_ABSTRACT_RPC_URL = 'https://api.mainnet.abs.xyz';
 const ABSCOPE_SUGGEST_URL = 'https://abscope.live/api/suggest';
 const ABSCOPE_PORTAL_PROXY_URL = 'https://abscope.live/api/proxy';
 const ABSTRACT_PROFILE_OVERRIDE_BASE = 'https://abstract-assets.abs.xyz/avatars/profile_override';
-const DEFAULT_BAKERY_CONTRACT = '0xFEB79a841D69C08aFCDC7B2BEEC8a6fbbe46C455';
+const DEFAULT_BAKERY_CONTRACT = '0x30b49389D5271712b7e539a690B2F7b92afA3c31';
 const DEFAULT_PAYOUT_BPS = [5000, 2000, 1500, 1000, 500];
 const SOLO_LEADERBOARD_BUCKET_SHARE = 0.70;
 const SOLO_ACTIVITY_BUCKET_SHARE = 0.30;
@@ -116,6 +116,7 @@ const PAYOUT_MODEL_GROUPED_SCORE = 'grouped-score-top10';
 const GROUPED_SCORE_PLACEMENT_BUCKET_SHARE = 1;
 const GROUPED_SCORE_QUALIFIED_BAKERIES = 10;
 const GROUPED_SCORE_DAILY_GROWTH_PERCENT = 5;
+const GROUPED_SCORE_FLAT_SCORE_MARKETING_SEASON = 7;
 const BUTTON_MY_STATS = '📊 My stats';
 const BUTTON_CHECK_PLAYER = '🔎 Check player';
 const BUTTON_REWARDS = '🍪 Rewards';
@@ -264,6 +265,7 @@ function getMarketingSeason(agent, season) {
   if (Number.isFinite(poolMarketingSeason) && poolMarketingSeason > 0) return poolMarketingSeason;
 
   const normalizedSeasonId = Number(season?.id);
+  if (normalizedSeasonId >= 9) return 7;
   if (normalizedSeasonId >= 8) return 6;
   if (normalizedSeasonId >= 7) return 5;
   return null;
@@ -1379,7 +1381,7 @@ function allowApproxGasFallback() {
 }
 
 async function fetchAgent(baseUrl) {
-  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 2_500, curlFallback: false });
+  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 10_000 });
 }
 
 async function fetchActiveSeason(baseUrl) {
@@ -1796,6 +1798,9 @@ export function renderGroupedScorePayoutReport({ agent = null, season, ethUsd, g
   const groupedTier = bakeryTiers.find((tier) => String(tier?.name ?? '').toLowerCase().includes('grouped'));
   const openTier = bakeryTiers.find((tier) => String(tier?.name ?? '').toLowerCase().includes('open'));
   const season6Docs = agent?.coreMechanics?.bakeryCreation?.season6Docs;
+  const scoreFormula = agent?.coreMechanics?.leaderboardsAndPayouts?.scoreFormula;
+  const usesFlatScore = marketingSeason >= GROUPED_SCORE_FLAT_SCORE_MARKETING_SEASON
+    || (typeof scoreFormula === 'string' && /no daily score scaler/i.test(scoreFormula));
   const groupedMemberCap = Number(season6Docs?.memberCap ?? agent?.liveState?.gameplayCaps?.clanMemberCap) || 50;
   const groupedCooldownBlocks = Number(groupedTier?.bakeCooldownBlocks ?? season6Docs?.bakeCooldownBlocks ?? 5) || 5;
   const openCooldownBlocks = Number(openTier?.bakeCooldownBlocks ?? 1) || 1;
@@ -1835,17 +1840,25 @@ export function renderGroupedScorePayoutReport({ agent = null, season, ethUsd, g
   lines.push('Member payout = member score / bakery score * bakery payout.');
   lines.push('');
   lines.push('<b>Score</b>');
-  lines.push(`Score is cookie-based and grows +${GROUPED_SCORE_DAILY_GROWTH_PERCENT}% per season day: D0 1.00x, D1 1.05x, D7 1.35x.`);
+  if (usesFlatScore) {
+    lines.push('Score = cookies baked * 1.00. There is no daily score scaler in this season.');
+  } else {
+    lines.push(`Score is cookie-based and grows +${GROUPED_SCORE_DAILY_GROWTH_PERCENT}% per season day: D0 1.00x, D1 1.05x, D7 1.35x.`);
+  }
   lines.push('Rewards can change until the season ends because the score share keeps moving.');
   lines.push('');
   if (marketingSeason >= 6) {
-    lines.push('<b>Season 6 bakeries</b>');
+    lines.push(`<b>Season ${marketingSeason} bakeries</b>`);
     lines.push(`Grouped: ${groupedMemberCap} members, 1 bake per baker every ${groupedCooldownBlocks} blocks.`);
     lines.push(`Open: solo bakery, 1 bake per baker every ${openCooldownBlocks} block${openCooldownBlocks === 1 ? '' : 's'}.`);
     lines.push('The payout leaderboard is global score-share top 10, not fixed-rank percentages.');
     lines.push('');
-    lines.push('<b>Auto-bake, upgrades, events</b>');
+    lines.push(`<b>Auto-bake, upgrades${marketingSeason >= 7 ? ', skills, rewards' : ', events'}</b>`);
     lines.push('Auto-bake can create future score, but /ch only reads live public score and exact on-chain bake fees.');
+    if (marketingSeason >= 7) {
+      lines.push('Player skills can change gameplay output, but /ch uses the final public score already reported by the game.');
+      lines.push('Ecosystem reward drawings are separate from the ETH prize pool and are not included in ROI.');
+    }
     if (upgradeDefinitions.length > 0) {
       const upgradeNames = upgradeDefinitions.map((upgrade) => upgrade?.name).filter(Boolean).join(', ');
       if (upgradeNames) lines.push(`Upgrade paths: ${upgradeNames}.`);
@@ -3762,8 +3775,9 @@ function checkPromptText(chat) {
       : 'Send the Rugpull Bakery username or the wallet address in the <code>0x...</code> format.',
     'I will show the estimated reward and profit/loss.',
     '',
-    'Current season: top 10 bakeries split 100% of the prize pool by bakery score.',
+    'Current season: top 10 bakeries split 100% of the ETH prize pool by final score.',
     'Inside a qualified bakery, reward is split by each member score contribution.',
+    'Score follows cookies baked at 1.00x this season; ecosystem reward drawings are separate.',
     'Costs use exact on-chain bake fees when available.',
   ];
   return promptLines.join('\n');
