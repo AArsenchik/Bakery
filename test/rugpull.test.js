@@ -187,6 +187,18 @@ test('renders a grouped score payout report for season 8 top-7 config', () => {
   assert.match(report, /Season 8 uses top-7 score-share placement payouts/);
 });
 
+test('uses season 8 top-7 grouped score fallback when agent data is missing', () => {
+  const report = renderGroupedScorePayoutReport({
+    season: { id: 10, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+    generatedAt: new Date('2026-06-11T10:00:00.000Z'),
+  });
+
+  assert.match(report, /Season 8 payout/);
+  assert.match(report, /Top 7 bakeries qualify by final score/);
+  assert.match(report, /Bakery payout = bakery score \/ top-7 total score \* placement pool/);
+});
+
 test('renders a grouped score payout report for season 6', () => {
   const report = renderGroupedScorePayoutReport({
     agent: {

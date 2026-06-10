@@ -9,8 +9,9 @@
 3. Для legacy-сезонов с payout по bakery balance бот считает стоимость `1,000` cookies по текущему распределению.
 4. Для solo-сезонов бот показывает breakdown leaderboard/activity payout по текущему пулу.
 5. Для division-сезона бот показывает bucket'ы `Standard leaderboard / Standard activity / Open leaderboard` и считает `/ch` по division-specific payout table.
-6. Для Season 5/6 бот использует score-share модель: топ-10 bakeries делят 100% prize pool по доле bakery score, а внутри bakery reward делится по доле member score contribution.
-7. Для Season 6 бот учитывает live `agent.json`: Grouped/Open bakery tiers, 50-member grouped bakeries, 5-block grouped bake cooldown, Open 1-block cadence, shared upgrades and random events.
+6. Для score-share сезонов бот использует live payout config из `agent.json`: S5-S7 квалифицируют top-10 bakeries, текущий S8 квалифицирует top-7 bakeries.
+7. Для текущего Season 8 бот считает 100% placement pool по доле bakery score среди top-7, а внутри bakery reward делится по доле member score contribution.
+8. Для Season 8 бот учитывает live `agent.json`: database season id `10`, Grouped/Open tiers, 50-member grouped bakeries, 5-block grouped bake cooldown, Open 1-block cadence, skills, upgrades, cleanup protection and random events.
 
 ## Запуск
 
@@ -66,9 +67,10 @@ Inline-кнопки в Telegram:
 - В группах бот ждет ответ только от того пользователя, который вызвал `/ch`, и безопаснее всего отвечать reply на prompt бота.
 - Можно сразу отправить `/ch username` или `/ch 0x...` в одном сообщении.
 - Чтобы не вводить username каждый раз, нажми `💾 Save account` один раз, а потом используй `📊 My stats`.
-- В Season 5/6 `/ch` считает estimated reward только для top-10 bakeries: `bakery score / top-10 score * prize pool`, затем `member score / bakery score`.
-- Season 6 использует score как reward metric, не raw cookies: score растет от cookies baked с daily scaler `+5%` за день сезона.
-- Season 6 rewards могут меняться до конца сезона, потому что score share постоянно меняется.
+- В текущем Season 8 `/ch` считает estimated reward только для top-7 bakeries: `bakery score / top-7 score * prize pool`, затем `member score / bakery score`.
+- Season 8 использует score как reward metric, не raw cookies: score = baked cookies * 1.00, без daily score scaler.
+- Season 8 rewards могут меняться до конца сезона, потому что score share постоянно меняется.
+- Season 8 docs предупреждают, что accounts using non-official AGW implementations are not eligible for prize pool rewards; бот показывает live estimate, но не подтверждает eligibility.
 - В image card для score-share сезонов rank tile показывает две доли: bakery score share и личную member score share, чтобы было понятно почему rank #2 не означает весь reward.
 - Auto-bake, upgrades, boosts/rugs и random events могут менять будущий score; бот не запускает действия, а только читает live public stats и on-chain fees.
 - Если у игрока есть Abstract Global Wallet profile/avatar, бот пытается подтянуть avatar через тот же публичный lookup-подход, что использует Abscope.

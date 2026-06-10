@@ -125,6 +125,7 @@ const PAYOUT_MODEL_DIVISIONS = 'division-standard-open';
 const PAYOUT_MODEL_GROUPED_SCORE = 'grouped-score-top10';
 const GROUPED_SCORE_PLACEMENT_BUCKET_SHARE = 1;
 const GROUPED_SCORE_QUALIFIED_BAKERIES = 10;
+const SEASON_8_GROUPED_SCORE_QUALIFIED_BAKERIES = 7;
 const FAST_GROUPED_SCORE_QUALIFIED_BAKERIES = 7;
 const GROUPED_SCORE_DAILY_GROWTH_PERCENT = 5;
 const GROUPED_SCORE_FLAT_SCORE_MARKETING_SEASON = 7;
@@ -274,7 +275,23 @@ function positiveNumber(value) {
   return Number.isFinite(number) && number > 0 ? number : null;
 }
 
-function getGroupedScoreConfig(agent = null) {
+function defaultGroupedScoreQualifiedBakeryCount(agent = null, season = null) {
+  const marketingSeason = getMarketingSeason(agent, season);
+  return marketingSeason >= 8
+    ? SEASON_8_GROUPED_SCORE_QUALIFIED_BAKERIES
+    : GROUPED_SCORE_QUALIFIED_BAKERIES;
+}
+
+function cachedOrDefaultGroupedScoreQualifiedBakeryCount(value, season = null) {
+  const defaultCount = defaultGroupedScoreQualifiedBakeryCount(null, season);
+  const cachedCount = positiveNumber(value);
+  if (defaultCount === SEASON_8_GROUPED_SCORE_QUALIFIED_BAKERIES && cachedCount && cachedCount > defaultCount) {
+    return defaultCount;
+  }
+  return cachedCount ?? defaultCount;
+}
+
+function getGroupedScoreConfig(agent = null, season = null) {
   const leaderboards = agent?.coreMechanics?.leaderboardsAndPayouts ?? {};
   const placementPool = getScoreSharePlacementPool(agent);
   const payoutBuckets = Array.isArray(leaderboards.currentSeasonPayoutBuckets)
@@ -287,7 +304,7 @@ function getGroupedScoreConfig(agent = null) {
   ));
   const qualifiedBakeryCount = positiveNumber(placementPool?.qualifiedBakeryCount)
     ?? positiveNumber(scoreShareBucket?.qualifiedBakeryCount)
-    ?? GROUPED_SCORE_QUALIFIED_BAKERIES;
+    ?? defaultGroupedScoreQualifiedBakeryCount(agent, season);
   const placementBucketShare = positiveNumber(placementPool?.prizePoolShareBps)
     ? Number(placementPool.prizePoolShareBps) / 10_000
     : (positiveNumber(scoreShareBucket?.prizePoolShareBps)
@@ -301,7 +318,10 @@ function getGroupedScoreConfig(agent = null) {
 }
 
 function groupedScoreConfigFallbackAgent(index = checkIndexCache) {
-  const qualifiedBakeryCount = positiveNumber(index?.qualifiedBakeryCount) ?? FAST_GROUPED_SCORE_QUALIFIED_BAKERIES;
+  const qualifiedBakeryCount = cachedOrDefaultGroupedScoreQualifiedBakeryCount(
+    index?.qualifiedBakeryCount,
+    index?.season,
+  ) ?? FAST_GROUPED_SCORE_QUALIFIED_BAKERIES;
   const placementBucketShare = positiveNumber(index?.groupedScorePlacementBucketShare) ?? GROUPED_SCORE_PLACEMENT_BUCKET_SHARE;
 
   return {
@@ -825,7 +845,10 @@ function deserializeCheckIndex(serialized) {
     payoutModel: [PAYOUT_MODEL_GROUPED_SCORE, PAYOUT_MODEL_DIVISIONS].includes(inferredPayoutModel)
       ? inferredPayoutModel
       : (serialized.payoutModel ?? inferredPayoutModel),
-    qualifiedBakeryCount: positiveNumber(serialized.qualifiedBakeryCount) ?? GROUPED_SCORE_QUALIFIED_BAKERIES,
+    qualifiedBakeryCount: cachedOrDefaultGroupedScoreQualifiedBakeryCount(
+      serialized.qualifiedBakeryCount,
+      serialized.season,
+    ),
     groupedScorePlacementBucketShare: positiveNumber(serialized.groupedScorePlacementBucketShare) ?? GROUPED_SCORE_PLACEMENT_BUCKET_SHARE,
     season: serialized.season ?? null,
     ethUsd: serialized.ethUsd ?? null,
@@ -2016,7 +2039,7 @@ export function calculateGroupedScorePayout({
 
 export function renderGroupedScorePayoutReport({ agent = null, season, ethUsd, generatedAt }) {
   const prizePoolEth = weiToEth(season.prizePool ?? season.finalizedPrizePool);
-  const groupedScoreConfig = getGroupedScoreConfig(agent);
+  const groupedScoreConfig = getGroupedScoreConfig(agent, season);
   const qualifiedBakeryCount = groupedScoreConfig.qualifiedBakeryCount;
   const placementBucketShare = groupedScoreConfig.placementBucketShare;
   const placementBucketEth = prizePoolEth * placementBucketShare;
@@ -2363,7 +2386,7 @@ async function buildCheckIndex() {
   const rpcHttp = agent?.network?.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL);
   const bakeryContract = agent?.contracts?.bakery ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT);
   const boostManagerContract = normalizeAddress(agent?.contracts?.boostManager);
-  const groupedScoreConfig = getGroupedScoreConfig(agent);
+  const groupedScoreConfig = getGroupedScoreConfig(agent, season);
   const divisionLeaderboards = isDivisionPayoutModel(payoutModel)
     ? await Promise.all([
         fetchTopBakeries(baseUrl, seasonId, STANDARD_DIVISION_PAYOUT_LIMIT, DIVISION_STANDARD_TIER_ID).catch(() => []),
@@ -2457,7 +2480,7 @@ async function buildMinimalCheckIndex() {
 
   const ethUsd = await fetchEthUsd();
   const payoutModel = detectPayoutModel(agent, season, bakeries);
-  const groupedScoreConfig = getGroupedScoreConfig(agent);
+  const groupedScoreConfig = getGroupedScoreConfig(agent, season);
   const divisionLeaderboards = isDivisionPayoutModel(payoutModel)
     ? await Promise.all([
         fetchTopBakeries(baseUrl, season.id, STANDARD_DIVISION_PAYOUT_LIMIT, DIVISION_STANDARD_TIER_ID).catch(() => []),
@@ -3343,7 +3366,7 @@ function estimateRewardForMember({
       qualifiedBakeryCount: payout.qualifiedBakeryCount,
       placementBucketShare: payout.placementBucketShare,
       isTopBakery: payout.qualifies,
-      rewardMode: 'grouped-score-top10',
+      rewardMode: `grouped-score-top${payout.qualifiedBakeryCount}`,
     };
   }
 
