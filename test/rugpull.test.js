@@ -147,8 +147,44 @@ test('renders a grouped score payout report for season 5', () => {
 
   assert.match(report, /Placement pool \(100%\): 10 ETH/);
   assert.match(report, /Top 10 bakeries qualify by final score/);
-  assert.match(report, /Bakery payout = bakery score \/ top-10 total score \* prize pool/);
+  assert.match(report, /Bakery payout = bakery score \/ top-10 total score \* placement pool/);
   assert.match(report, /Bakery cap: 50 members/);
+});
+
+test('renders a grouped score payout report for season 8 top-7 config', () => {
+  const report = renderGroupedScorePayoutReport({
+    agent: {
+      liveState: {
+        marketingSeason: 8,
+        gameplayCaps: {
+          clanMemberCap: 50,
+          bakeryTiers: [
+            { tierId: 1, name: 'Grouped', enabled: true, bakeCooldownBlocks: 5 },
+            { tierId: 2, name: 'Open', enabled: true, bakeCooldownBlocks: 1 },
+          ],
+        },
+      },
+      coreMechanics: {
+        leaderboardsAndPayouts: {
+          scoreFormula: 'score = cookiesBaked * 1.00 for all projected bakes. There is no daily score scaler in Season 8.',
+          scoreSharePlacementPool: {
+            marketingSeason: 8,
+            prizePoolShareBps: 10000,
+            qualifiedBakeryCount: 7,
+            fixedRankPercentages: false,
+          },
+        },
+      },
+    },
+    season: { id: 10, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+    generatedAt: new Date('2026-06-10T10:00:00.000Z'),
+  });
+
+  assert.match(report, /Season 8 payout/);
+  assert.match(report, /Top 7 bakeries qualify by final score/);
+  assert.match(report, /top-7 total score \* placement pool/);
+  assert.match(report, /Season 8 uses top-7 score-share placement payouts/);
 });
 
 test('renders a grouped score payout report for season 6', () => {
@@ -654,7 +690,7 @@ test('renders a grouped score season check report', () => {
   assert.match(report, /Cookies baked: <b>88.2K<\/b>/);
   assert.match(report, /Rank: <b>#6<\/b>/);
   assert.match(report, /Your est\. reward:/);
-  assert.match(report, /Bakery score share: 60% of the 100% top-10 placement pool/);
+  assert.match(report, /Bakery score share: 60% of the top-10 placement pool/);
   assert.match(report, /Member score share: 25% of bakery score/);
   assert.match(report, /Score-share payout can change/);
 });
