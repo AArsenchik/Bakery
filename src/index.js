@@ -9,10 +9,7 @@ const DEFAULT_BASE_URL = 'https://www.rugpullbakery.com';
 const DEFAULT_ABSTRACT_RPC_URL = 'https://api.mainnet.abs.xyz';
 const ABSCOPE_SUGGEST_URL = 'https://abscope.live/api/suggest';
 const ABSCOPE_PORTAL_PROXY_URL = 'https://abscope.live/api/proxy';
-const ABSTRACT_PORTAL_USER_URL = 'https://backend.portal.abs.xyz/api/user';
 const ABSTRACT_PROFILE_OVERRIDE_BASE = 'https://abstract-assets.abs.xyz/avatars/profile_override';
-const ETHERSCAN_V2_API_URL = 'https://api.etherscan.io/v2/api';
-const ABSTRACT_CHAIN_ID = 2741;
 const DEFAULT_BAKERY_CONTRACT = '0x30b49389D5271712b7e539a690B2F7b92afA3c31';
 const DEFAULT_PAYOUT_BPS = [5000, 2000, 1500, 1000, 500];
 const SOLO_LEADERBOARD_BUCKET_SHARE = 0.70;
@@ -89,7 +86,6 @@ const COOKIE_UNIT = 1000;
 const DATA_DIR_URL = runtimeDataDirUrl();
 const CACHE_FILE = dataFileUrl('latest-report.json');
 const CHECK_INDEX_FILE = dataFileUrl('latest-check-index.json');
-const CHECK_STATS_FILE = dataFileUrl('latest-check-stats.json');
 const CHAT_REGISTRY_FILE = dataFileUrl('known-chats.json');
 const SAVED_ACCOUNTS_FILE = dataFileUrl('saved-accounts.json');
 const BASELINE_CHAT_REGISTRY_FILE = new URL('../data/all-time-known-chats-baseline.json', import.meta.url);
@@ -99,12 +95,6 @@ const CACHE_STALE_MS = 10 * 60_000;
 const CHECK_INDEX_TTL_MS = 30_000;
 const CHECK_REPORT_TTL_MS = 45_000;
 const CHECK_STATS_TTL_MS = 2 * 60_000;
-const CHECK_STATS_STALE_MS = 30 * 60_000;
-const DEFAULT_CHECK_GAS_BLOCKING_TIMEOUT_MS = 2_500;
-const DEFAULT_AGW_PROFILE_BLOCKING_TIMEOUT_MS = 650;
-const DEFAULT_EXACT_GAS_RECEIPT_MAX_TX = 2_500;
-const DEFAULT_FAST_GAS_MAX_TX_COUNT = 300_000;
-const DEFAULT_FAST_GAS_MAX_ETH = 25;
 const STAT_CARD_PHOTO_CACHE_TTL_MS = 5 * 60_000;
 const STAT_CARD_PHOTO_CACHE_MAX = 100;
 const BOT_LOCK_STALE_MS = 10 * 60_000;
@@ -125,8 +115,6 @@ const PAYOUT_MODEL_DIVISIONS = 'division-standard-open';
 const PAYOUT_MODEL_GROUPED_SCORE = 'grouped-score-top10';
 const GROUPED_SCORE_PLACEMENT_BUCKET_SHARE = 1;
 const GROUPED_SCORE_QUALIFIED_BAKERIES = 10;
-const SEASON_8_GROUPED_SCORE_QUALIFIED_BAKERIES = 7;
-const FAST_GROUPED_SCORE_QUALIFIED_BAKERIES = 7;
 const GROUPED_SCORE_DAILY_GROWTH_PERCENT = 5;
 const GROUPED_SCORE_FLAT_SCORE_MARKETING_SEASON = 7;
 const BUTTON_MY_STATS = '📊 My stats';
@@ -151,7 +139,6 @@ let checkIndexCache = null;
 let checkIndexInFlight = null;
 const checkReportCache = new Map();
 const checkStatsCache = new Map();
-const checkStatsInFlight = new Map();
 const checkReportInFlight = new Map();
 const abstractProfileCache = new Map();
 const statCardPhotoCache = new Map();
@@ -270,77 +257,6 @@ function getScoreSharePlacementPool(agent) {
     ?? null;
 }
 
-function positiveNumber(value) {
-  const number = Number(value);
-  return Number.isFinite(number) && number > 0 ? number : null;
-}
-
-function defaultGroupedScoreQualifiedBakeryCount(agent = null, season = null) {
-  const marketingSeason = getMarketingSeason(agent, season);
-  return marketingSeason >= 8
-    ? SEASON_8_GROUPED_SCORE_QUALIFIED_BAKERIES
-    : GROUPED_SCORE_QUALIFIED_BAKERIES;
-}
-
-function cachedOrDefaultGroupedScoreQualifiedBakeryCount(value, season = null) {
-  const defaultCount = defaultGroupedScoreQualifiedBakeryCount(null, season);
-  const cachedCount = positiveNumber(value);
-  if (defaultCount === SEASON_8_GROUPED_SCORE_QUALIFIED_BAKERIES && cachedCount && cachedCount > defaultCount) {
-    return defaultCount;
-  }
-  return cachedCount ?? defaultCount;
-}
-
-function getGroupedScoreConfig(agent = null, season = null) {
-  const leaderboards = agent?.coreMechanics?.leaderboardsAndPayouts ?? {};
-  const placementPool = getScoreSharePlacementPool(agent);
-  const payoutBuckets = Array.isArray(leaderboards.currentSeasonPayoutBuckets)
-    ? leaderboards.currentSeasonPayoutBuckets
-    : [];
-  const scoreShareBucket = payoutBuckets.find((bucket) => (
-    bucket?.type === 'scoreSharePlacement'
-    || bucket?.qualifiedBakeryCount !== undefined
-    || bucket?.formula === 'scoreShare'
-  ));
-  const qualifiedBakeryCount = positiveNumber(placementPool?.qualifiedBakeryCount)
-    ?? positiveNumber(scoreShareBucket?.qualifiedBakeryCount)
-    ?? defaultGroupedScoreQualifiedBakeryCount(agent, season);
-  const placementBucketShare = positiveNumber(placementPool?.prizePoolShareBps)
-    ? Number(placementPool.prizePoolShareBps) / 10_000
-    : (positiveNumber(scoreShareBucket?.prizePoolShareBps)
-        ? Number(scoreShareBucket.prizePoolShareBps) / 10_000
-        : GROUPED_SCORE_PLACEMENT_BUCKET_SHARE);
-
-  return {
-    qualifiedBakeryCount,
-    placementBucketShare,
-  };
-}
-
-function groupedScoreConfigFallbackAgent(index = checkIndexCache) {
-  const qualifiedBakeryCount = cachedOrDefaultGroupedScoreQualifiedBakeryCount(
-    index?.qualifiedBakeryCount,
-    index?.season,
-  ) ?? FAST_GROUPED_SCORE_QUALIFIED_BAKERIES;
-  const placementBucketShare = positiveNumber(index?.groupedScorePlacementBucketShare) ?? GROUPED_SCORE_PLACEMENT_BUCKET_SHARE;
-
-  return {
-    liveState: {
-      gameplayCaps: {
-        cookieScale: 10000,
-      },
-    },
-    coreMechanics: {
-      leaderboardsAndPayouts: {
-        scoreSharePlacementPool: {
-          qualifiedBakeryCount,
-          prizePoolShareBps: Math.round(placementBucketShare * 10_000),
-        },
-      },
-    },
-  };
-}
-
 function getMarketingSeason(agent, season) {
   const liveMarketingSeason = Number(agent?.liveState?.marketingSeason);
   if (Number.isFinite(liveMarketingSeason) && liveMarketingSeason > 0) return liveMarketingSeason;
@@ -349,7 +265,6 @@ function getMarketingSeason(agent, season) {
   if (Number.isFinite(poolMarketingSeason) && poolMarketingSeason > 0) return poolMarketingSeason;
 
   const normalizedSeasonId = Number(season?.id);
-  if (normalizedSeasonId >= 10) return 8;
   if (normalizedSeasonId >= 9) return 7;
   if (normalizedSeasonId >= 8) return 6;
   if (normalizedSeasonId >= 7) return 5;
@@ -451,10 +366,9 @@ function scoreForDisplay(entity) {
   return scoreMetric(entity, 'score') / 10_000;
 }
 
-function isGroupedScoreQualifiedRank(rank, qualifiedBakeryCount = GROUPED_SCORE_QUALIFIED_BAKERIES) {
+function isGroupedScoreQualifiedRank(rank) {
   const normalizedRank = normalizeRank(rank);
-  const normalizedQualifiedCount = positiveNumber(qualifiedBakeryCount) ?? GROUPED_SCORE_QUALIFIED_BAKERIES;
-  return normalizedRank !== null && normalizedRank <= normalizedQualifiedCount;
+  return normalizedRank !== null && normalizedRank <= GROUPED_SCORE_QUALIFIED_BAKERIES;
 }
 
 function rankShareFromTable(rank, table) {
@@ -781,7 +695,7 @@ function isCacheUsable(cache) {
 }
 
 export function isCheckIndexFresh(index, now = Date.now()) {
-  return Boolean(index) && !index.isMinimal && now - index.generatedAtMs <= CHECK_INDEX_TTL_MS;
+  return Boolean(index) && now - index.generatedAtMs <= CHECK_INDEX_TTL_MS;
 }
 
 async function readCacheFile(cacheFile) {
@@ -812,15 +726,11 @@ async function saveReportCache(cache) {
 
 function serializeCheckIndex(index) {
   return {
-    isMinimal: Boolean(index.isMinimal),
     generatedAtMs: index.generatedAtMs,
     baseUrl: index.baseUrl,
     bakeryContract: index.bakeryContract,
-    boostManagerContract: index.boostManagerContract,
     rpcHttp: index.rpcHttp,
     payoutModel: index.payoutModel,
-    qualifiedBakeryCount: index.qualifiedBakeryCount,
-    groupedScorePlacementBucketShare: index.groupedScorePlacementBucketShare,
     season: index.season,
     ethUsd: index.ethUsd,
     seasonStartTime: index.seasonStartTime,
@@ -836,20 +746,13 @@ function deserializeCheckIndex(serialized) {
   if (!serialized || typeof serialized !== 'object') return null;
   const inferredPayoutModel = inferPayoutModelFromSeasonId(serialized.season?.id ?? 0);
   return {
-    isMinimal: Boolean(serialized.isMinimal),
     generatedAtMs: serialized.generatedAtMs ?? 0,
     baseUrl: serialized.baseUrl ?? env('RUGPULL_BASE_URL', DEFAULT_BASE_URL),
     bakeryContract: serialized.bakeryContract ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT),
-    boostManagerContract: serialized.boostManagerContract ?? null,
     rpcHttp: serialized.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL),
     payoutModel: [PAYOUT_MODEL_GROUPED_SCORE, PAYOUT_MODEL_DIVISIONS].includes(inferredPayoutModel)
       ? inferredPayoutModel
       : (serialized.payoutModel ?? inferredPayoutModel),
-    qualifiedBakeryCount: cachedOrDefaultGroupedScoreQualifiedBakeryCount(
-      serialized.qualifiedBakeryCount,
-      serialized.season,
-    ),
-    groupedScorePlacementBucketShare: positiveNumber(serialized.groupedScorePlacementBucketShare) ?? GROUPED_SCORE_PLACEMENT_BUCKET_SHARE,
     season: serialized.season ?? null,
     ethUsd: serialized.ethUsd ?? null,
     seasonStartTime: serialized.seasonStartTime ?? null,
@@ -866,59 +769,7 @@ async function loadCheckIndexCache() {
 }
 
 async function saveCheckIndexCache(index) {
-  if (index?.isMinimal) return;
   await writeCacheFile(CHECK_INDEX_FILE, serializeCheckIndex(index));
-}
-
-function slimCheckStatsValue(value) {
-  if (!value || typeof value !== 'object') return null;
-  return {
-    transactionCount: Number.isFinite(value.transactionCount) ? value.transactionCount : null,
-    gasSpentEth: Number.isFinite(value.gasSpentEth) ? value.gasSpentEth : null,
-    averageFeeEth: Number.isFinite(value.averageFeeEth) ? value.averageFeeEth : null,
-    source: value.source ?? 'unknown',
-    boostTransactionCount: Number.isFinite(value.boostTransactionCount) ? value.boostTransactionCount : 0,
-    failedTransactionCount: Number.isFinite(value.failedTransactionCount) ? value.failedTransactionCount : 0,
-    rpcGasSpentEth: Number.isFinite(value.rpcGasSpentEth) ? value.rpcGasSpentEth : null,
-    explorerExtraGasSpentEth: Number.isFinite(value.explorerExtraGasSpentEth) ? value.explorerExtraGasSpentEth : 0,
-  };
-}
-
-async function loadCheckStatsCache() {
-  const stored = await readCacheFile(CHECK_STATS_FILE);
-  const entries = stored && typeof stored === 'object' && !Array.isArray(stored)
-    ? Object.entries(stored)
-    : [];
-
-  checkStatsCache.clear();
-  for (const [key, entry] of entries) {
-    if (!entry?.value || !Number.isFinite(entry?.generatedAtMs)) continue;
-    checkStatsCache.set(String(key), {
-      generatedAtMs: entry.generatedAtMs,
-      value: entry.value,
-    });
-  }
-}
-
-async function saveCheckStatsCache() {
-  const entries = [...checkStatsCache.entries()]
-    .filter(([, entry]) => entry?.value && Date.now() - entry.generatedAtMs <= CHECK_STATS_STALE_MS)
-    .slice(-500)
-    .map(([key, entry]) => [key, {
-      generatedAtMs: entry.generatedAtMs,
-      value: slimCheckStatsValue(entry.value),
-    }]);
-
-  await writeCacheFile(CHECK_STATS_FILE, Object.fromEntries(entries));
-}
-
-function setCheckStatsCache(cacheKey, value) {
-  checkStatsCache.set(cacheKey, {
-    value,
-    generatedAtMs: Date.now(),
-  });
-  saveCheckStatsCache().catch(() => {});
-  return value;
 }
 
 function normalizeSavedIdentity(identity) {
@@ -1369,10 +1220,7 @@ async function backfillMissingFeeEntries(rpcHttp, transactionHashes) {
 }
 
 function isExactGasSource(source) {
-  return source === 'on-chain-bake-fees-exact'
-    || source === 'on-chain-bake-receipts-exact'
-    || source === 'on-chain-gameplay-fees-exact'
-    || source === 'on-chain-gameplay-fees-exact+explorer-gameplay-fees';
+  return source === 'on-chain-bake-fees-exact' || source === 'on-chain-bake-receipts-exact';
 }
 
 function blockToHex(blockNumber) {
@@ -1532,39 +1380,8 @@ function allowApproxGasFallback() {
   return String(env('ALLOW_APPROX_GAS_FALLBACK', 'false')).toLowerCase() === 'true';
 }
 
-function abstractExplorerApiKey() {
-  return env('ABSTRACT_ETHERSCAN_API_KEY')
-    ?? env('ETHERSCAN_API_KEY')
-    ?? env('ABSCAN_API_KEY')
-    ?? null;
-}
-
-function explorerTxMaxPages() {
-  return Math.max(1, Math.floor(Number(env('ETHERSCAN_TXLIST_MAX_PAGES', '12')) || 12));
-}
-
-function explorerTxOffset() {
-  return Math.max(1, Math.min(10_000, Math.floor(Number(env('ETHERSCAN_TXLIST_OFFSET', '10000')) || 10_000)));
-}
-
-function feeEthFromExplorerTx(tx) {
-  try {
-    const gasUsed = BigInt(tx?.gasUsed ?? tx?.gas ?? 0);
-    const gasPrice = BigInt(tx?.gasPrice ?? tx?.effectiveGasPrice ?? 0);
-    if (gasUsed <= 0n || gasPrice <= 0n) return null;
-    return Number(gasUsed * gasPrice) / 1e18;
-  } catch {
-    return null;
-  }
-}
-
-function isFailedExplorerTx(tx) {
-  return String(tx?.isError ?? '') === '1'
-    || String(tx?.txreceipt_status ?? '') === '0';
-}
-
-async function fetchAgent(baseUrl, { timeoutMs = 10_000 } = {}) {
-  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs });
+async function fetchAgent(baseUrl) {
+  return fetchJson(new URL('/agent.json', baseUrl), { timeoutMs: 10_000 });
 }
 
 async function fetchActiveSeason(baseUrl) {
@@ -1618,13 +1435,6 @@ async function fetchTopChefsPage(baseUrl, seasonId, limit = 100, cursor = undefi
   return { items, nextCursor };
 }
 
-async function fetchMyBakeryInit(baseUrl, address) {
-  return unwrapTrpcJson(
-    await fetchJson(trpcUrl(baseUrl, 'leaderboard.getMyBakeryInit', { address }), { timeoutMs: 4_000 }),
-    'leaderboard.getMyBakeryInit',
-  );
-}
-
 async function fetchBakeryMembers(baseUrl, bakeryId, seasonId, limit = 200) {
   const json = unwrapTrpcJson(
     await fetchJson(trpcUrl(baseUrl, 'leaderboard.getBakeryMembers', { bakeryId, seasonId, limit }), { timeoutMs: 6_000 }),
@@ -1662,30 +1472,12 @@ export function abstractProfileOverridePngUrl(userId) {
   return normalized ? `${ABSTRACT_PROFILE_OVERRIDE_BASE}/${encodeURIComponent(normalized)}.png` : null;
 }
 
-function abstractProfileOverrideCandidateUrls(userId) {
-  const normalized = String(userId ?? '').trim();
-  if (!normalized) return [];
-
-  const encoded = encodeURIComponent(normalized);
-  return [
-    `${ABSTRACT_PROFILE_OVERRIDE_BASE}/${encoded}.png`,
-    `${ABSTRACT_PROFILE_OVERRIDE_BASE}/${encoded}.jpg`,
-    `${ABSTRACT_PROFILE_OVERRIDE_BASE}/${encoded}.jpeg`,
-  ];
-}
-
-function avatarUserIdFromUrl(url) {
-  const match = String(url ?? '').match(/\/profile_override\/([^/?#.]+)\.(?:png|jpe?g|webp)(?:[?#]|$)/i);
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
 function abstractProfileFromPortalUser(user) {
   if (!user) return null;
-  const avatarUrls = uniqueAvatarUrls(
+  const avatarUrls = [
+    abstractProfileOverridePngUrl(user.id),
     user.overrideProfilePictureUrl,
-    abstractProfileOverrideCandidateUrls(user.id),
-    abstractProfileOverrideCandidateUrls(avatarUserIdFromUrl(user.overrideProfilePictureUrl)),
-  );
+  ].filter(Boolean);
   const avatarUrl = preferredAvatarUrl(avatarUrls);
   return {
     name: user.name || null,
@@ -1740,15 +1532,6 @@ async function fetchAbstractPortalStreamer(username) {
   return data?.streamer ?? data?.user ?? data ?? null;
 }
 
-async function fetchAbstractPortalUserByAddress(address) {
-  const normalized = normalizeAddress(address);
-  if (!normalized) return null;
-
-  const url = new URL(`${ABSTRACT_PORTAL_USER_URL}/address/${normalized}`);
-  const data = await fetchJson(url, { timeoutMs: 2_500 });
-  return data?.user ?? data ?? null;
-}
-
 async function fetchAbstractProfileSuggestions(query) {
   const normalized = String(query ?? '').trim();
   if (!normalized || normalized.length < 2) return [];
@@ -1781,24 +1564,6 @@ export async function fetchAbstractGlobalWalletProfile(address, hints = []) {
   ];
   const uniqueQueries = [...new Set(queries.map((query) => query.toLowerCase()))];
 
-  try {
-    const portalUser = await fetchAbstractPortalUserByAddress(normalizedAddress).catch(() => null);
-    const portalProfile = abstractProfileFromPortalUser(portalUser);
-    if (portalProfile && (!portalProfile.walletAddress || portalProfile.walletAddress === normalizedAddress)) {
-      const profile = {
-        ...portalProfile,
-        walletAddress: normalizedAddress,
-      };
-      abstractProfileCache.set(normalizedAddress, {
-        value: profile,
-        generatedAtMs: Date.now(),
-      });
-      return profile;
-    }
-  } catch (error) {
-    console.warn(`Could not fetch Abstract portal profile for ${normalizedAddress}: ${error.message}`);
-  }
-
   for (const query of uniqueQueries) {
     try {
       const suggestions = await fetchAbstractProfileSuggestions(query);
@@ -1806,17 +1571,13 @@ export async function fetchAbstractGlobalWalletProfile(address, hints = []) {
       if (!suggestion) continue;
 
       const suggestionAvatarUrl = suggestion.avatar || null;
-      const suggestionAvatarUserId = avatarUserIdFromUrl(suggestionAvatarUrl);
       const shouldFetchPortal = !isRenderableAvatarUrl(suggestionAvatarUrl);
       let profile = {
         name: suggestion.username || null,
         walletAddress: normalizedAddress,
         profilePictureUrl: preferredAvatarUrl([suggestionAvatarUrl]),
         agwProfilePictureUrl: suggestionAvatarUrl,
-        avatarUrls: uniqueAvatarUrls(
-          suggestionAvatarUrl,
-          abstractProfileOverrideCandidateUrls(suggestionAvatarUserId),
-        ),
+        avatarUrls: uniqueAvatarUrls(suggestionAvatarUrl),
         agwUserId: null,
       };
 
@@ -1981,18 +1742,8 @@ export function calculateDivisionPayoutBuckets({ season, ethUsd }) {
   };
 }
 
-export function calculateGroupedScorePayout({
-  season,
-  topBakeries,
-  bakery,
-  member,
-  ethUsd,
-  qualifiedBakeryCount = GROUPED_SCORE_QUALIFIED_BAKERIES,
-  placementBucketShare = GROUPED_SCORE_PLACEMENT_BUCKET_SHARE,
-}) {
+export function calculateGroupedScorePayout({ season, topBakeries, bakery, member, ethUsd }) {
   const prizePoolEth = weiToEth(season.prizePool ?? season.finalizedPrizePool);
-  const normalizedQualifiedCount = positiveNumber(qualifiedBakeryCount) ?? GROUPED_SCORE_QUALIFIED_BAKERIES;
-  const normalizedPlacementBucketShare = positiveNumber(placementBucketShare) ?? GROUPED_SCORE_PLACEMENT_BUCKET_SHARE;
   const seenBakeryIds = new Set();
   const dedupedTopBakeries = [];
   for (const item of Array.isArray(topBakeries) ? topBakeries : []) {
@@ -2001,15 +1752,15 @@ export function calculateGroupedScorePayout({
     seenBakeryIds.add(key);
     dedupedTopBakeries.push(item);
   }
-  const qualifiedTopBakeries = dedupedTopBakeries
+  const topTen = dedupedTopBakeries
     .filter((item, index) => {
       const rank = normalizeRank(item?.rank);
-      return rank === null ? index < normalizedQualifiedCount : rank <= normalizedQualifiedCount;
+      return rank === null ? index < GROUPED_SCORE_QUALIFIED_BAKERIES : rank <= GROUPED_SCORE_QUALIFIED_BAKERIES;
     })
-    .slice(0, normalizedQualifiedCount);
-  const totalTopScore = qualifiedTopBakeries.reduce((sum, item) => sum + scoreMetric(item, 'topBakery.score'), 0);
+    .slice(0, GROUPED_SCORE_QUALIFIED_BAKERIES);
+  const totalTopScore = topTen.reduce((sum, item) => sum + scoreMetric(item, 'topBakery.score'), 0);
   const bakeryRank = normalizeRank(bakery?.rank);
-  const qualifies = isGroupedScoreQualifiedRank(bakeryRank, normalizedQualifiedCount);
+  const qualifies = isGroupedScoreQualifiedRank(bakeryRank);
   const bakeryScore = scoreMetric(bakery, 'bakery.score');
   const memberScore = scoreMetric(member, 'member.score');
   const bakeryShare = qualifies && totalTopScore > 0 && bakeryScore > 0
@@ -2018,13 +1769,12 @@ export function calculateGroupedScorePayout({
   const memberShare = qualifies && bakeryScore > 0 && memberScore > 0
     ? memberScore / bakeryScore
     : 0;
-  const rewardEth = prizePoolEth * normalizedPlacementBucketShare * bakeryShare * memberShare;
+  const rewardEth = prizePoolEth * GROUPED_SCORE_PLACEMENT_BUCKET_SHARE * bakeryShare * memberShare;
 
   return {
     prizePoolEth,
-    placementBucketEth: prizePoolEth * normalizedPlacementBucketShare,
-    qualifiedBakeryCount: normalizedQualifiedCount,
-    placementBucketShare: normalizedPlacementBucketShare,
+    placementBucketEth: prizePoolEth * GROUPED_SCORE_PLACEMENT_BUCKET_SHARE,
+    qualifiedBakeryCount: GROUPED_SCORE_QUALIFIED_BAKERIES,
     qualifies,
     bakeryRank,
     bakeryScore,
@@ -2039,10 +1789,7 @@ export function calculateGroupedScorePayout({
 
 export function renderGroupedScorePayoutReport({ agent = null, season, ethUsd, generatedAt }) {
   const prizePoolEth = weiToEth(season.prizePool ?? season.finalizedPrizePool);
-  const groupedScoreConfig = getGroupedScoreConfig(agent, season);
-  const qualifiedBakeryCount = groupedScoreConfig.qualifiedBakeryCount;
-  const placementBucketShare = groupedScoreConfig.placementBucketShare;
-  const placementBucketEth = prizePoolEth * placementBucketShare;
+  const placementBucketEth = prizePoolEth * GROUPED_SCORE_PLACEMENT_BUCKET_SHARE;
   const marketingSeason = getMarketingSeason(agent, season);
   const seasonLabel = marketingSeason ? `Season ${marketingSeason}` : 'Current season';
   const bakeryTiers = Array.isArray(agent?.liveState?.gameplayCaps?.bakeryTiers)
@@ -2085,11 +1832,11 @@ export function renderGroupedScorePayoutReport({ agent = null, season, ethUsd, g
   const lines = ['<b>Current Season Payouts</b>', ''];
 
   lines.push(`Prize pool: ${formatEth(prizePoolEth, 4)} ETH`);
-  lines.push(`Placement pool (${formatPercent(placementBucketShare * 100, 0)}): ${formatEth(placementBucketEth, 4)} ETH`);
+  lines.push(`Placement pool (100%): ${formatEth(placementBucketEth, 4)} ETH`);
   lines.push('');
   lines.push(`<b>${seasonLabel} payout</b>`);
-  lines.push(`Top ${qualifiedBakeryCount} bakeries qualify by final score.`);
-  lines.push(`Bakery payout = bakery score / top-${qualifiedBakeryCount} total score * placement pool.`);
+  lines.push(`Top ${GROUPED_SCORE_QUALIFIED_BAKERIES} bakeries qualify by final score.`);
+  lines.push('Bakery payout = bakery score / top-10 total score * prize pool.');
   lines.push('Member payout = member score / bakery score * bakery payout.');
   lines.push('');
   lines.push('<b>Score</b>');
@@ -2104,16 +1851,13 @@ export function renderGroupedScorePayoutReport({ agent = null, season, ethUsd, g
     lines.push(`<b>Season ${marketingSeason} bakeries</b>`);
     lines.push(`Grouped: ${groupedMemberCap} members, 1 bake per baker every ${groupedCooldownBlocks} blocks.`);
     lines.push(`Open: solo bakery, 1 bake per baker every ${openCooldownBlocks} block${openCooldownBlocks === 1 ? '' : 's'}.`);
-    lines.push(`The payout leaderboard is global score-share top ${qualifiedBakeryCount}, not fixed-rank percentages.`);
+    lines.push('The payout leaderboard is global score-share top 10, not fixed-rank percentages.');
     lines.push('');
     lines.push(`<b>Auto-bake, upgrades${marketingSeason >= 7 ? ', skills, rewards' : ', events'}</b>`);
     lines.push('Auto-bake can create future score, but /ch only reads live public score and exact on-chain bake fees.');
     if (marketingSeason >= 7) {
       lines.push('Player skills can change gameplay output, but /ch uses the final public score already reported by the game.');
       lines.push('Ecosystem reward drawings are separate from the ETH prize pool and are not included in ROI.');
-    }
-    if (marketingSeason >= 8) {
-      lines.push('Season 8 uses top-7 score-share placement payouts; non-official AGW implementations may be ineligible for prize pool rewards.');
     }
     if (upgradeDefinitions.length > 0) {
       const upgradeNames = upgradeDefinitions.map((upgrade) => upgrade?.name).filter(Boolean).join(', ');
@@ -2385,8 +2129,6 @@ async function buildCheckIndex() {
   const payoutModel = detectPayoutModel(agent, season, bakeries);
   const rpcHttp = agent?.network?.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL);
   const bakeryContract = agent?.contracts?.bakery ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT);
-  const boostManagerContract = normalizeAddress(agent?.contracts?.boostManager);
-  const groupedScoreConfig = getGroupedScoreConfig(agent, season);
   const divisionLeaderboards = isDivisionPayoutModel(payoutModel)
     ? await Promise.all([
         fetchTopBakeries(baseUrl, seasonId, STANDARD_DIVISION_PAYOUT_LIMIT, DIVISION_STANDARD_TIER_ID).catch(() => []),
@@ -2443,15 +2185,11 @@ async function buildCheckIndex() {
   const seasonStartTime = extractSeasonStartTime(season, bakeries, members);
 
   return {
-    isMinimal: false,
     generatedAtMs: Date.now(),
     baseUrl,
     bakeryContract,
-    boostManagerContract,
     rpcHttp,
     payoutModel,
-    qualifiedBakeryCount: groupedScoreConfig.qualifiedBakeryCount,
-    groupedScorePlacementBucketShare: groupedScoreConfig.placementBucketShare,
     season,
     ethUsd,
     bakeryMap,
@@ -2465,14 +2203,18 @@ async function buildCheckIndex() {
 
 async function buildMinimalCheckIndex() {
   const { baseUrl, agent, season, bakeries } = await withBaseUrlFallback(async (resolvedBaseUrl) => {
-    const [resolvedSeason, resolvedBakeries] = await Promise.all([
+    const [resolvedAgent, resolvedSeason, resolvedBakeries] = await Promise.all([
+      fetchAgent(resolvedBaseUrl).catch((error) => {
+        console.warn(`Could not fetch agent.json for minimal /ch index, using default cookie scale: ${error.message}`);
+        return { liveState: { gameplayCaps: { cookieScale: 10000 } } };
+      }),
       fetchActiveSeason(resolvedBaseUrl),
       fetchTopBakeries(resolvedBaseUrl, undefined, CHECK_INDEX_BAKERY_LIMIT),
     ]);
 
     return {
       baseUrl: resolvedBaseUrl,
-      agent: groupedScoreConfigFallbackAgent(),
+      agent: resolvedAgent,
       season: resolvedSeason,
       bakeries: resolvedBakeries,
     };
@@ -2480,7 +2222,6 @@ async function buildMinimalCheckIndex() {
 
   const ethUsd = await fetchEthUsd();
   const payoutModel = detectPayoutModel(agent, season, bakeries);
-  const groupedScoreConfig = getGroupedScoreConfig(agent, season);
   const divisionLeaderboards = isDivisionPayoutModel(payoutModel)
     ? await Promise.all([
         fetchTopBakeries(baseUrl, season.id, STANDARD_DIVISION_PAYOUT_LIMIT, DIVISION_STANDARD_TIER_ID).catch(() => []),
@@ -2497,15 +2238,11 @@ async function buildMinimalCheckIndex() {
       });
 
   return {
-    isMinimal: true,
     generatedAtMs: Date.now(),
     baseUrl,
     bakeryContract: agent?.contracts?.bakery ?? env('BAKERY_CONTRACT_ADDRESS', DEFAULT_BAKERY_CONTRACT),
-    boostManagerContract: normalizeAddress(agent?.contracts?.boostManager),
     rpcHttp: agent?.network?.rpcHttp ?? env('ABSTRACT_RPC_URL', DEFAULT_ABSTRACT_RPC_URL),
     payoutModel,
-    qualifiedBakeryCount: groupedScoreConfig.qualifiedBakeryCount,
-    groupedScorePlacementBucketShare: groupedScoreConfig.placementBucketShare,
     season,
     ethUsd,
     bakeryMap: new Map([...bakeries, ...divisionLeaderboards.flat()].map((bakery) => [bakery.id, bakery])),
@@ -2539,8 +2276,12 @@ async function getCheckIndex() {
   }
 
   if (checkIndexCache) {
-    refreshCheckIndexInBackground(true);
-    return checkIndexCache;
+    try {
+      return await refreshCheckIndex();
+    } catch (error) {
+      console.warn(`Could not refresh stale /ch index, using the latest cached index: ${error.message}`);
+      return checkIndexCache;
+    }
   }
 
   try {
@@ -2552,21 +2293,6 @@ async function getCheckIndex() {
     saveCheckIndexCache(minimalIndex).catch(() => {});
     return minimalIndex;
   }
-}
-
-async function getCheckIndexForIdentity(identity) {
-  const trimmed = String(identity ?? '').trim();
-  if (isAddress(trimmed) && !checkIndexCache) {
-    try {
-      const minimalIndex = await buildMinimalCheckIndex();
-      refreshCheckIndexInBackground(true);
-      return minimalIndex;
-    } catch (error) {
-      console.warn(`Could not build fast address /ch index, falling back to full index: ${error.message}`);
-    }
-  }
-
-  return getCheckIndex();
 }
 
 function refreshCheckIndexInBackground(force = false) {
@@ -2686,160 +2412,6 @@ async function fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId,
       topicForUint(seasonId),
     ],
   }, fromBlock, latestBlock);
-}
-
-async function fetchSeasonUserContractLogs({ rpcHttp, contract, address, seasonId, seasonStartTime }) {
-  const normalizedContract = normalizeAddress(contract);
-  if (!normalizedContract) return [];
-
-  const [fromBlock, latestBlock] = await Promise.all([
-    findSeasonStartBlock(rpcHttp, seasonId, seasonStartTime),
-    fetchLatestBlockNumber(rpcHttp),
-  ]);
-
-  const userTopic = topicForAddress(address).toLowerCase();
-  const topicFilters = [
-    [null, topicForAddress(address)],
-    [null, null, topicForAddress(address)],
-    [null, null, null, topicForAddress(address)],
-  ];
-  const logGroups = await Promise.all(
-    topicFilters.map((topics) => fetchLogsForRange(rpcHttp, {
-      address: normalizedContract,
-      topics,
-    }, fromBlock, latestBlock).catch(() => [])),
-  );
-  const seen = new Set();
-  const userLogs = [];
-
-  for (const log of logGroups.flat()) {
-    const hash = String(log?.transactionHash ?? '').toLowerCase();
-    const logIndex = String(log?.logIndex ?? '');
-    const key = `${hash}:${logIndex}`;
-    if (!hash || seen.has(key)) continue;
-    if (!Array.isArray(log?.topics) || !log.topics.some((topic) => String(topic).toLowerCase() === userTopic)) continue;
-    seen.add(key);
-    userLogs.push(log);
-  }
-
-  return userLogs;
-}
-
-async function fetchExplorerAccountTransactions({ address, startBlock, endBlock }) {
-  const apiKey = abstractExplorerApiKey();
-  if (!apiKey) return null;
-
-  const result = [];
-  const offset = explorerTxOffset();
-  const maxPages = explorerTxMaxPages();
-
-  for (let page = 1; page <= maxPages; page += 1) {
-    const url = new URL(ETHERSCAN_V2_API_URL);
-    url.searchParams.set('chainid', String(ABSTRACT_CHAIN_ID));
-    url.searchParams.set('module', 'account');
-    url.searchParams.set('action', 'txlist');
-    url.searchParams.set('address', address);
-    url.searchParams.set('startblock', String(startBlock));
-    url.searchParams.set('endblock', String(endBlock));
-    url.searchParams.set('page', String(page));
-    url.searchParams.set('offset', String(offset));
-    url.searchParams.set('sort', 'asc');
-    url.searchParams.set('apikey', apiKey);
-
-    const data = await fetchJson(url, { timeoutMs: 12_000 });
-    if (data?.status === '0') {
-      const message = String(data?.message ?? data?.result ?? '');
-      if (/no transactions/i.test(message)) return result;
-      throw new Error(`Explorer txlist failed: ${message || 'unknown error'}`);
-    }
-
-    const items = Array.isArray(data?.result) ? data.result : [];
-    result.push(...items);
-    if (items.length < offset) break;
-  }
-
-  return result;
-}
-
-async function fetchExplorerGameplayFeeStats({
-  address,
-  seasonId,
-  seasonStartTime,
-  rpcHttp,
-  bakeryContract,
-  boostManagerContract,
-  knownHashes = [],
-}) {
-  const apiKey = abstractExplorerApiKey();
-  if (!apiKey) {
-    return {
-      available: false,
-      gasSpentEth: 0,
-      transactionHashes: [],
-      failedTransactionCount: 0,
-      boostTransactionCount: 0,
-    };
-  }
-
-  const [fromBlock, latestBlock] = await Promise.all([
-    findSeasonStartBlock(rpcHttp, seasonId, seasonStartTime),
-    fetchLatestBlockNumber(rpcHttp),
-  ]);
-  const transactions = await fetchExplorerAccountTransactions({
-    address,
-    startBlock: fromBlock.toString(),
-    endBlock: latestBlock.toString(),
-  });
-  if (!transactions) {
-    return {
-      available: false,
-      gasSpentEth: 0,
-      transactionHashes: [],
-      failedTransactionCount: 0,
-      boostTransactionCount: 0,
-    };
-  }
-
-  const normalizedAddress = normalizeAddress(address);
-  const bakeryAddress = normalizeAddress(bakeryContract);
-  const boostManagerAddress = normalizeAddress(boostManagerContract);
-  const known = new Set(knownHashes.map((hash) => String(hash).toLowerCase()));
-  const seasonStart = Number(seasonStartTime) || 0;
-  const included = [];
-  let gasSpentEth = 0;
-  let failedTransactionCount = 0;
-  let boostTransactionCount = 0;
-
-  for (const tx of transactions) {
-    const hash = String(tx?.hash ?? '').toLowerCase();
-    if (!hash || known.has(hash)) continue;
-    if (normalizeAddress(tx?.from) !== normalizedAddress) continue;
-
-    const timestamp = Number(tx?.timeStamp ?? tx?.timestamp ?? 0);
-    if (seasonStart > 0 && Number.isFinite(timestamp) && timestamp > 0 && timestamp < seasonStart) continue;
-
-    const to = normalizeAddress(tx?.to);
-    const isFailed = isFailedExplorerTx(tx);
-    const isBoostManagerTx = boostManagerAddress && to === boostManagerAddress;
-    const isFailedBakeTx = bakeryAddress && to === bakeryAddress && isFailed;
-    if (!isBoostManagerTx && !isFailedBakeTx) continue;
-
-    const feeEth = feeEthFromExplorerTx(tx);
-    if (!Number.isFinite(feeEth) || feeEth <= 0) continue;
-
-    gasSpentEth += feeEth;
-    included.push(hash);
-    if (isFailed) failedTransactionCount += 1;
-    if (isBoostManagerTx) boostTransactionCount += 1;
-  }
-
-  return {
-    available: true,
-    gasSpentEth,
-    transactionHashes: included,
-    failedTransactionCount,
-    boostTransactionCount,
-  };
 }
 
 async function fetchAverageBakeFeeEth(rpcHttp, transactionHashes) {
@@ -2982,233 +2554,8 @@ export function gasSpentEthFromTxStats(txStats) {
   return Number.isFinite(txStats?.gasSpentEth) ? txStats.gasSpentEth : null;
 }
 
-function checkStatsCacheKey(address, seasonId) {
-  return `${String(address).toLowerCase()}:${seasonId}`;
-}
-
-function checkGasBlockingTimeoutMs() {
-  return Math.max(250, Math.floor(Number(env('CHECK_GAS_BLOCKING_TIMEOUT_MS', String(DEFAULT_CHECK_GAS_BLOCKING_TIMEOUT_MS))) || DEFAULT_CHECK_GAS_BLOCKING_TIMEOUT_MS));
-}
-
-function agwProfileBlockingTimeoutMs() {
-  return Math.max(100, Math.floor(Number(env('AGW_PROFILE_BLOCKING_TIMEOUT_MS', String(DEFAULT_AGW_PROFILE_BLOCKING_TIMEOUT_MS))) || DEFAULT_AGW_PROFILE_BLOCKING_TIMEOUT_MS));
-}
-
-function exactGasReceiptMaxTx() {
-  return Math.max(0, Math.floor(Number(env('EXACT_GAS_RECEIPT_MAX_TX', String(DEFAULT_EXACT_GAS_RECEIPT_MAX_TX))) || DEFAULT_EXACT_GAS_RECEIPT_MAX_TX));
-}
-
-function fastGasMaxTxCount() {
-  return Math.max(1, Math.floor(Number(env('FAST_GAS_MAX_TX_COUNT', String(DEFAULT_FAST_GAS_MAX_TX_COUNT))) || DEFAULT_FAST_GAS_MAX_TX_COUNT));
-}
-
-function fastGasMaxEth() {
-  return Math.max(0.001, Number(env('FAST_GAS_MAX_ETH', String(DEFAULT_FAST_GAS_MAX_ETH))) || DEFAULT_FAST_GAS_MAX_ETH);
-}
-
-function isReasonableGasEstimate(value) {
-  return Number.isFinite(value) && value >= 0 && value <= fastGasMaxEth();
-}
-
-function normalizeGameplayActionCount(value) {
-  const count = Number(value);
-  if (!Number.isFinite(count) || count < 0) return null;
-  if (count <= fastGasMaxTxCount()) return count;
-
-  const scaledCount = count / 10_000;
-  return scaledCount >= 0 && scaledCount <= fastGasMaxTxCount()
-    ? scaledCount
-    : null;
-}
-
-function hasScaledActionCounters(member) {
-  return ['txCount', 'bakedTxCount', 'effectiveTxCount', 'score'].some((field) => {
-    const value = Number(member?.[field]);
-    return Number.isFinite(value) && value > fastGasMaxTxCount();
-  });
-}
-
-function gameplayActionCountFromMember(member) {
-  const bakeTxCount = normalizeGameplayActionCount(member?.txCount);
-  const boostAttempts = Number(member?.boostAttempts ?? 0);
-  const rugAttempts = Number(member?.rugAttempts ?? 0);
-
-  return {
-    bakeTxCount,
-    boostActionCount: Math.max(0, (Number.isFinite(boostAttempts) ? boostAttempts : 0) + (Number.isFinite(rugAttempts) ? rugAttempts : 0)),
-  };
-}
-
-function deriveFastTxStatsFromMember(member, cachedValue = null) {
-  const { bakeTxCount, boostActionCount } = gameplayActionCountFromMember(member);
-  const transactionCount = bakeTxCount ?? (Number.isFinite(cachedValue?.transactionCount) ? cachedValue.transactionCount : null);
-  const averageFeeEth = Number.isFinite(cachedValue?.averageFeeEth) && cachedValue.averageFeeEth > 0
-    ? cachedValue.averageFeeEth
-    : bakeTxFeeEth();
-  const cachedTxCount = Number.isFinite(cachedValue?.transactionCount) ? cachedValue.transactionCount : null;
-  let gasSpentEth = null;
-
-  const cachedGasSpentEth = isReasonableGasEstimate(cachedValue?.gasSpentEth)
-    ? cachedValue.gasSpentEth
-    : null;
-
-  if (cachedGasSpentEth !== null) {
-    const additionalBakeTx = transactionCount !== null && cachedTxCount !== null
-      ? Math.max(0, transactionCount - cachedTxCount)
-      : 0;
-    gasSpentEth = cachedGasSpentEth + (additionalBakeTx * averageFeeEth);
-  } else if (transactionCount !== null && transactionCount <= fastGasMaxTxCount()) {
-    gasSpentEth = (transactionCount + boostActionCount) * averageFeeEth;
-  }
-
-  if (!isReasonableGasEstimate(gasSpentEth)) {
-    gasSpentEth = null;
-  }
-
-  return {
-    transactionCount,
-    gasSpentEth,
-    averageFeeEth,
-    source: cachedValue?.gasSpentEth === gasSpentEth && cachedValue?.source
-      ? cachedValue.source
-      : 'public-season-stats-fast-estimate',
-    transactionHashes: [],
-    boostTransactionCount: Number.isFinite(cachedValue?.boostTransactionCount)
-      ? cachedValue.boostTransactionCount
-      : boostActionCount,
-    failedTransactionCount: Number.isFinite(cachedValue?.failedTransactionCount)
-      ? cachedValue.failedTransactionCount
-      : 0,
-  };
-}
-
-function promiseWithTimeout(promise, timeoutMs, label = 'operation') {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => {
-      setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs).unref();
-    }),
-  ]);
-}
-
-function shouldRunExactGasRefresh(member, cachedValue = null) {
-  if (abstractExplorerApiKey()) return true;
-  if (Array.isArray(cachedValue?.rpcFeeTransactionHashes) && cachedValue.rpcFeeTransactionHashes.length > 0) return true;
-
-  const { bakeTxCount, boostActionCount } = gameplayActionCountFromMember(member);
-  if (bakeTxCount === null && hasScaledActionCounters(member) && !Number.isFinite(cachedValue?.transactionCount)) {
-    return false;
-  }
-  const estimatedActionCount = (bakeTxCount ?? Number(cachedValue?.transactionCount) ?? 0) + boostActionCount;
-  return estimatedActionCount <= exactGasReceiptMaxTx();
-}
-
-function refreshBakeTxStatsInBackground(args) {
-  const cacheKey = checkStatsCacheKey(args.address, args.seasonId);
-  const existing = checkStatsInFlight.get(cacheKey);
-  if (existing) return existing;
-
-  const promise = fetchBakeTxStats(args)
-    .catch((error) => {
-      console.warn(`Could not refresh exact gas stats for ${args.address}: ${error.message}`);
-      throw error;
-    })
-    .finally(() => {
-      checkStatsInFlight.delete(cacheKey);
-    });
-
-  checkStatsInFlight.set(cacheKey, promise);
-  promise.catch(() => {});
-  return promise;
-}
-
-async function fetchBakeTxStatsFast(args) {
-  const cacheKey = checkStatsCacheKey(args.address, args.seasonId);
-  const cached = checkStatsCache.get(cacheKey);
-  const cachedValue = cached && Date.now() - cached.generatedAtMs <= CHECK_STATS_STALE_MS
-    ? cached.value
-    : null;
-  const fastValue = deriveFastTxStatsFromMember(args.member, cachedValue);
-
-  if (cached && Date.now() - cached.generatedAtMs <= CHECK_STATS_TTL_MS) {
-    const cachedGas = cached.value?.gasSpentEth;
-    const cachedTxCount = Number.isFinite(cached.value?.transactionCount)
-      ? cached.value.transactionCount
-      : null;
-    const fastTxCount = Number.isFinite(fastValue.transactionCount)
-      ? fastValue.transactionCount
-      : null;
-    const cacheHasUsefulStats = cachedTxCount !== null || Number.isFinite(cachedGas);
-    const cacheMatchesFastStats = fastTxCount === null || cachedTxCount === fastTxCount;
-
-    if (cacheHasUsefulStats && cacheMatchesFastStats && (!Number.isFinite(cachedGas) || isReasonableGasEstimate(cachedGas))) {
-      return cached.value;
-    }
-  }
-
-  if (!shouldRunExactGasRefresh(args.member, cachedValue)) {
-    return setCheckStatsCache(cacheKey, fastValue);
-  }
-
-  const refreshPromise = refreshBakeTxStatsInBackground(args);
-  try {
-    return await promiseWithTimeout(refreshPromise, checkGasBlockingTimeoutMs(), 'gas stats');
-  } catch {
-    if (fastValue.transactionCount !== null) {
-      setCheckStatsCache(cacheKey, fastValue);
-      return fastValue;
-    }
-    if (cachedValue) return cachedValue;
-    throw new Error('Gas stats are still warming up');
-  }
-}
-
-async function fetchIncrementalRpcFeeStats(rpcHttp, feeTransactionHashes, cachedValue = null) {
-  const uniqueHashes = [...new Set(feeTransactionHashes.map((hash) => String(hash).toLowerCase()).filter(Boolean))];
-  const cachedHashes = Array.isArray(cachedValue?.rpcFeeTransactionHashes)
-    ? cachedValue.rpcFeeTransactionHashes
-    : (Array.isArray(cachedValue?.transactionHashes) && isExactGasSource(cachedValue?.source)
-        ? cachedValue.transactionHashes
-        : []);
-  const cachedGasSpentEth = Number.isFinite(cachedValue?.rpcGasSpentEth)
-    ? cachedValue.rpcGasSpentEth
-    : (Array.isArray(cachedValue?.transactionHashes)
-        && !Number.isFinite(cachedValue?.explorerExtraGasSpentEth)
-        && isExactGasSource(cachedValue?.source)
-        && Number.isFinite(cachedValue?.gasSpentEth)
-        ? cachedValue.gasSpentEth
-        : null);
-
-  if (cachedHashes.length && Number.isFinite(cachedGasSpentEth)) {
-    const current = new Set(uniqueHashes);
-    const cachedSet = new Set(cachedHashes.map((hash) => String(hash).toLowerCase()));
-    const cacheStillApplies = [...cachedSet].every((hash) => current.has(hash));
-
-    if (cacheStillApplies) {
-      const newHashes = uniqueHashes.filter((hash) => !cachedSet.has(hash));
-      const incrementalFeeEth = newHashes.length ? await fetchTotalBakeFeeEth(rpcHttp, newHashes) : 0;
-      return {
-        gasSpentEth: cachedGasSpentEth + incrementalFeeEth,
-        feeTransactionHashes: uniqueHashes,
-      };
-    }
-  }
-
-  return {
-    gasSpentEth: await fetchTotalBakeFeeEth(rpcHttp, uniqueHashes),
-    feeTransactionHashes: uniqueHashes,
-  };
-}
-
-async function fetchBakeTxStats({
-  address,
-  seasonId,
-  seasonStartTime,
-  rpcHttp,
-  bakeryContract,
-  boostManagerContract = null,
-}) {
-  const cacheKey = checkStatsCacheKey(address, seasonId);
+async function fetchBakeTxStats({ address, seasonId, seasonStartTime, rpcHttp, bakeryContract }) {
+  const cacheKey = `${String(address).toLowerCase()}:${seasonId}`;
   const cached = checkStatsCache.get(cacheKey);
   if (cached && Date.now() - cached.generatedAtMs <= CHECK_STATS_TTL_MS) {
     return cached.value;
@@ -3216,76 +2563,56 @@ async function fetchBakeTxStats({
 
   const cachedValue = cached?.value ?? null;
   let transactionHashes = [];
-  let boostTransactionHashes = [];
 
   try {
-    const [logs, boostLogs] = await Promise.all([
-      fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime }),
-      fetchSeasonUserContractLogs({
-        rpcHttp,
-        contract: boostManagerContract,
-        address,
-        seasonId,
-        seasonStartTime,
-      }).catch((error) => {
-        console.warn(`Could not fetch BoostManager logs for ${address}: ${error.message}`);
-        return [];
-      }),
-    ]);
+    const logs = await fetchSeasonBakeLogs({ rpcHttp, bakeryContract, address, seasonId, seasonStartTime });
     transactionHashes = uniqueTransactionHashes(logs);
-    boostTransactionHashes = uniqueTransactionHashes(boostLogs);
-    const rpcFeeHashes = [...new Set([...transactionHashes, ...boostTransactionHashes])];
-    const rpcFeeStats = await fetchIncrementalRpcFeeStats(rpcHttp, rpcFeeHashes, cachedValue);
-    const explorerExtra = await fetchExplorerGameplayFeeStats({
-      address,
-      seasonId,
-      seasonStartTime,
-      rpcHttp,
-      bakeryContract,
-      boostManagerContract,
-      knownHashes: rpcFeeStats.feeTransactionHashes,
-    }).catch((error) => {
-      console.warn(`Could not fetch explorer gameplay tx fees for ${address}: ${error.message}`);
-      return {
-        available: false,
-        gasSpentEth: 0,
-        transactionHashes: [],
-        failedTransactionCount: 0,
-        boostTransactionCount: 0,
-      };
-    });
-    const gasSpentEth = rpcFeeStats.gasSpentEth + explorerExtra.gasSpentEth;
+    let gasSpentEth = null;
     let averageFeeEth = null;
+    let source = 'on-chain-bake-receipts-exact';
 
     if (
       isExactGasSource(cachedValue?.source)
+      && Array.isArray(cachedValue.transactionHashes)
       && Number.isFinite(cachedValue.gasSpentEth)
-      && rpcFeeStats.feeTransactionHashes.length >= (cachedValue.feeTransactionHashes?.length ?? cachedValue.transactionHashes?.length ?? 0)
+    ) {
+      const knownHashes = new Set(cachedValue.transactionHashes);
+      const newHashes = transactionHashes.filter((hash) => !knownHashes.has(hash));
+
+      if (!newHashes.length) {
+        gasSpentEth = cachedValue.gasSpentEth;
+      } else {
+        const incrementalFeeEth = await fetchTotalBakeFeeEth(rpcHttp, newHashes);
+        gasSpentEth = cachedValue.gasSpentEth + incrementalFeeEth;
+      }
+    } else {
+      gasSpentEth = await fetchTotalBakeFeeEth(rpcHttp, transactionHashes);
+    }
+
+    if (
+      cachedValue?.source === 'on-chain-bake-receipts-exact'
+      && Number.isFinite(cachedValue.gasSpentEth)
+      && transactionHashes.length >= (cachedValue.transactionHashes?.length ?? 0)
       && gasSpentEth + 1e-12 < cachedValue.gasSpentEth
     ) {
       throw new Error('Exact gas calculation regressed below cached exact value');
     }
 
-    averageFeeEth = rpcFeeStats.feeTransactionHashes.length > 0 ? rpcFeeStats.gasSpentEth / rpcFeeStats.feeTransactionHashes.length : bakeTxFeeEth();
+    averageFeeEth = transactionHashes.length > 0 ? gasSpentEth / transactionHashes.length : bakeTxFeeEth();
 
     const value = {
       transactionCount: transactionHashes.length,
       gasSpentEth,
       averageFeeEth,
-      source: explorerExtra.available
-        ? 'on-chain-gameplay-fees-exact+explorer-gameplay-fees'
-        : 'on-chain-gameplay-fees-exact',
+      source: 'on-chain-bake-fees-exact',
       transactionHashes,
-      boostTransactionHashes,
-      boostTransactionCount: boostTransactionHashes.length + explorerExtra.boostTransactionCount,
-      failedTransactionCount: explorerExtra.failedTransactionCount,
-      feeTransactionHashes: [...new Set([...rpcFeeStats.feeTransactionHashes, ...explorerExtra.transactionHashes])],
-      rpcFeeTransactionHashes: rpcFeeStats.feeTransactionHashes,
-      rpcGasSpentEth: rpcFeeStats.gasSpentEth,
-      explorerExtraGasSpentEth: explorerExtra.gasSpentEth,
     };
 
-    return setCheckStatsCache(cacheKey, value);
+    checkStatsCache.set(cacheKey, {
+      value,
+      generatedAtMs: Date.now(),
+    });
+    return value;
   } catch (error) {
     if (!transactionHashes.length) {
       if (cached) return cached.value;
@@ -3302,7 +2629,11 @@ async function fetchBakeTxStats({
         transactionHashes,
       };
 
-      return setCheckStatsCache(cacheKey, value);
+      checkStatsCache.set(cacheKey, {
+        value,
+        generatedAtMs: Date.now(),
+      });
+      return value;
     }
 
     try {
@@ -3313,7 +2644,11 @@ async function fetchBakeTxStats({
         averageFeeEth,
       });
 
-      return setCheckStatsCache(cacheKey, value);
+      checkStatsCache.set(cacheKey, {
+        value,
+        generatedAtMs: Date.now(),
+      });
+      return value;
     } catch (fallbackError) {
       if (transactionHashes.length) {
         const value = deriveApproxBakeTxStats({
@@ -3321,7 +2656,11 @@ async function fetchBakeTxStats({
           cachedValue,
         });
 
-        return setCheckStatsCache(cacheKey, value);
+        checkStatsCache.set(cacheKey, {
+          value,
+          generatedAtMs: Date.now(),
+        });
+        return value;
       }
       if (cached) return cached.value;
       throw new Error(`${error.message}; exact gas fallback failed: ${fallbackError.message}`);
@@ -3329,17 +2668,7 @@ async function fetchBakeTxStats({
   }
 }
 
-function estimateRewardForMember({
-  member,
-  bakery,
-  topBakeries = [],
-  bakeryValue,
-  season,
-  payoutModel,
-  ethUsd,
-  qualifiedBakeryCount = GROUPED_SCORE_QUALIFIED_BAKERIES,
-  groupedScorePlacementBucketShare = GROUPED_SCORE_PLACEMENT_BUCKET_SHARE,
-}) {
+function estimateRewardForMember({ member, bakery, topBakeries = [], bakeryValue, season, payoutModel, ethUsd }) {
   const cookies = memberCookiesForPayoutModel(member, payoutModel);
 
   if (isGroupedScorePayoutModel(payoutModel)) {
@@ -3349,8 +2678,6 @@ function estimateRewardForMember({
       bakery,
       member,
       ethUsd,
-      qualifiedBakeryCount,
-      placementBucketShare: groupedScorePlacementBucketShare,
     });
 
     return {
@@ -3363,10 +2690,8 @@ function estimateRewardForMember({
       bakeryScore: payout.bakeryScore,
       memberScore: payout.memberScore,
       totalTopScore: payout.totalTopScore,
-      qualifiedBakeryCount: payout.qualifiedBakeryCount,
-      placementBucketShare: payout.placementBucketShare,
       isTopBakery: payout.qualifies,
-      rewardMode: `grouped-score-top${payout.qualifiedBakeryCount}`,
+      rewardMode: 'grouped-score-top10',
     };
   }
 
@@ -3457,7 +2782,6 @@ export function renderCheckReport({
   rank,
   leaderboardShare,
   memberScoreShare = 0,
-  qualifiedBakeryCount = GROUPED_SCORE_QUALIFIED_BAKERIES,
   divisionTierId,
   divisionName,
   hasActivityBucket,
@@ -3480,7 +2804,7 @@ export function renderCheckReport({
   const rewardLabel = isDivision
     ? `${divisionName} leaderboard reward`
     : (isGroupedScore ? 'Your est. reward' : (isSolo ? 'Leaderboard reward' : 'Est. reward'));
-  const groupedTopText = isGroupedScore && isGroupedScoreQualifiedRank(rank, qualifiedBakeryCount) ? ` (top ${qualifiedBakeryCount})` : '';
+  const groupedTopText = isGroupedScore && isGroupedScoreQualifiedRank(rank) ? ' (top 10)' : '';
 
   lines.push(`<b>${escapeHtml(name)}</b>`);
   lines.push(`${escapeHtml(shortAddress(address))}`);
@@ -3515,11 +2839,11 @@ export function renderCheckReport({
   if (isGroupedScore) {
     const shareText = leaderboardShare > 0 ? formatPercent(leaderboardShare * 100, 3) : '0%';
     const memberShareText = memberScoreShare > 0 ? formatPercent(memberScoreShare * 100, 3) : '0%';
-    if (isGroupedScoreQualifiedRank(rank, qualifiedBakeryCount)) {
-      lines.push(`Bakery score share: ${shareText} of the top-${qualifiedBakeryCount} placement pool`);
+    if (isGroupedScoreQualifiedRank(rank)) {
+      lines.push(`Bakery score share: ${shareText} of the 100% top-10 placement pool`);
       lines.push(`Member score share: ${memberShareText} of bakery score`);
     } else {
-      lines.push(`Bakery payout: outside top ${qualifiedBakeryCount} right now`);
+      lines.push(`Bakery payout: outside top ${GROUPED_SCORE_QUALIFIED_BAKERIES} right now`);
     }
     lines.push('Score-share payout can change until the season ends.');
   } else if (isDivision) {
@@ -3564,7 +2888,6 @@ function buildCheckCardData({
   leaderboardShare,
   memberScoreShare = 0,
   totalTopScore = 0,
-  qualifiedBakeryCount = GROUPED_SCORE_QUALIFIED_BAKERIES,
   divisionTierId,
   divisionName,
   hasActivityBucket,
@@ -3583,11 +2906,11 @@ function buildCheckCardData({
   const oneKValue = bakeryValue ? `${formatEth(bakeryValue.ethPerThousandCookies, 6)} ETH` : 'OUTSIDE TOP 5';
   const rankValue = formatRank(rank);
   const rankSubvalue = isGroupedScore
-    ? (isGroupedScoreQualifiedRank(rank, qualifiedBakeryCount)
+    ? (isGroupedScoreQualifiedRank(rank)
         ? (totalTopScore > 0 && leaderboardShare > 0
             ? `BAKERY ${formatPercent(leaderboardShare * 100, 2)} / YOU ${formatPercent(memberScoreShare * 100, 2)}`
-            : `TOP ${qualifiedBakeryCount} SCORE PENDING`)
-        : `OUTSIDE TOP ${qualifiedBakeryCount}`)
+            : 'TOP 10 SCORE PENDING')
+        : `OUTSIDE TOP ${GROUPED_SCORE_QUALIFIED_BAKERIES}`)
     : (isDivision
     ? (leaderboardShare > 0
         ? `${divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD' : 'OPEN'} SHARE ${formatPercent(leaderboardShare * 100, 3)}`
@@ -3603,7 +2926,7 @@ function buildCheckCardData({
   const roiTileLabel = isDivision
     ? (divisionTierId === DIVISION_STANDARD_TIER_ID ? 'STD LB ROI' : 'OPEN ROI')
     : (isSolo ? 'LB ROI' : 'Net ROI');
-  const groupedTopText = isGroupedScore && isGroupedScoreQualifiedRank(rank, qualifiedBakeryCount) ? ` (top ${qualifiedBakeryCount})` : '';
+  const groupedTopText = isGroupedScore && isGroupedScoreQualifiedRank(rank) ? ' (top 10)' : '';
 
   return {
     title: 'Season Check',
@@ -3673,7 +2996,7 @@ function buildCheckCardData({
 }
 
 export async function buildCheckReport(identity) {
-  const index = await getCheckIndexForIdentity(identity);
+  const index = await getCheckIndex();
   const address = await resolveAddressByIdentity(index, identity);
 
   if (!address) {
@@ -3684,39 +3007,6 @@ export async function buildCheckReport(identity) {
   }
 
   let member = index.memberMap.get(address) ?? null;
-  let directBakery = null;
-  if (!member && isAddress(identity)) {
-    const init = await fetchMyBakeryInit(index.baseUrl, address).catch((error) => {
-      console.warn(`Could not fetch direct player bakery init for /ch (${address}): ${error.message}`);
-      return null;
-    });
-    if (init?.player) {
-      member = {
-        seasonId: init.player.seasonId ?? index.season.id,
-        address,
-        bakeryId: init.player.bakeryId,
-        rank: normalizeRank(init.rank),
-        txCount: init.player.txCount,
-        bakedTxCount: init.player.bakedTxCount,
-        score: init.player.score,
-        effectiveTxCount: init.player.effectiveTxCount,
-        referralCount: init.player.referralCount ?? 0,
-        boostAttempts: init.player.boostAttempts ?? 0,
-        boostLanded: init.player.boostLanded ?? 0,
-        rugAttempts: init.player.rugAttempts ?? 0,
-        rugLanded: init.player.rugLanded ?? 0,
-        registeredAt: init.player.registeredAt,
-      };
-      index.memberMap.set(address, member);
-    }
-    if (init?.bakery) {
-      directBakery = {
-        ...(index.bakeryMap.get(init.bakery.id) ?? {}),
-        ...init.bakery,
-      };
-      index.bakeryMap.set(directBakery.id, directBakery);
-    }
-  }
   if (!member) {
     const chef = await findChefByAddress(index.baseUrl, index.season.id, address).catch(() => null);
     if (chef) {
@@ -3746,44 +3036,23 @@ export async function buildCheckReport(identity) {
     };
   }
 
-  const txStatsPromise = fetchBakeTxStatsFast({
+  const txStatsPromise = fetchBakeTxStats({
     address,
-    member,
     seasonId: index.season.id,
     seasonStartTime: index.season?.startTime ?? index.seasonStartTime,
     rpcHttp: index.rpcHttp,
     bakeryContract: index.bakeryContract,
-    boostManagerContract: index.boostManagerContract,
   });
-  const bakeryPromise = directBakery
-    ? Promise.resolve(directBakery)
-    : index.bakeryMap.get(member.bakeryId)
+  const bakeryPromise = index.bakeryMap.get(member.bakeryId)
     ? Promise.resolve(index.bakeryMap.get(member.bakeryId))
     : fetchBakeryById(index.baseUrl, member.bakeryId, index.season.id);
   const profilePromise = index.profileMap.get(address)
     ? Promise.resolve(index.profileMap.get(address))
     : fetchProfilesByAddresses(index.baseUrl, [address]).catch(() => []);
-  const abstractProfileLookupPromise = fetchAbstractGlobalWalletProfile(address, [identity]).catch((error) => {
+  const abstractProfilePromise = fetchAbstractGlobalWalletProfile(address, [identity]).catch((error) => {
     console.warn(`Could not fetch AGW profile for /ch (${address}): ${error.message}`);
     return null;
   });
-  abstractProfileLookupPromise
-    .then((resolvedProfile) => {
-      if (!resolvedProfile) return;
-      const currentProfile = index.profileMap.get(address) ?? null;
-      const mergedProfile = mergeAbstractProfile(currentProfile, resolvedProfile);
-      index.profileMap.set(address, mergedProfile);
-      if (mergedProfile?.name) {
-        index.profileNameMap.set(normalizeName(mergedProfile.name), address);
-      }
-      saveCheckIndexCache(index).catch(() => {});
-    })
-    .catch(() => {});
-  const abstractProfilePromise = promiseWithTimeout(
-    abstractProfileLookupPromise,
-    agwProfileBlockingTimeoutMs(),
-    'AGW profile',
-  ).catch(() => null);
 
   const [bakery, profileLookup, txStats, abstractProfile] = await Promise.all([
     bakeryPromise.catch((error) => {
@@ -3824,23 +3093,10 @@ export async function buildCheckReport(identity) {
   }
   let resolvedAbstractProfile = abstractProfile;
   if (!resolvedAbstractProfile?.profilePictureUrl && profile?.name) {
-    const retryPromise = fetchAbstractGlobalWalletProfile(address, [profile.name]).catch((error) => {
+    resolvedAbstractProfile = await fetchAbstractGlobalWalletProfile(address, [profile.name]).catch((error) => {
       console.warn(`Could not retry AGW profile lookup for /ch (${address}, ${profile.name}): ${error.message}`);
       return null;
     });
-    retryPromise
-      .then((resolvedProfile) => {
-        if (!resolvedProfile) return;
-        const currentProfile = index.profileMap.get(address) ?? profile ?? null;
-        const mergedProfile = mergeAbstractProfile(currentProfile, resolvedProfile);
-        index.profileMap.set(address, mergedProfile);
-        if (mergedProfile?.name) {
-          index.profileNameMap.set(normalizeName(mergedProfile.name), address);
-        }
-        saveCheckIndexCache(index).catch(() => {});
-      })
-      .catch(() => {});
-    resolvedAbstractProfile = null;
   }
   if (resolvedAbstractProfile) {
     profile = mergeAbstractProfile(profile, resolvedAbstractProfile);
@@ -3950,8 +3206,6 @@ export async function buildCheckReport(identity) {
     season: index.season,
     payoutModel: index.payoutModel,
     ethUsd: index.ethUsd,
-    qualifiedBakeryCount: index.qualifiedBakeryCount,
-    groupedScorePlacementBucketShare: index.groupedScorePlacementBucketShare,
   });
 
   const txCount = txStats.transactionCount;
@@ -3963,7 +3217,6 @@ export async function buildCheckReport(identity) {
 
   return {
     ok: true,
-    address,
     cardData: buildCheckCardData({
       identity,
       profile,
@@ -3986,7 +3239,6 @@ export async function buildCheckReport(identity) {
       leaderboardShare: reward.leaderboardShare ?? 0,
       memberScoreShare: reward.memberScoreShare ?? 0,
       totalTopScore: reward.totalTopScore ?? 0,
-      qualifiedBakeryCount: reward.qualifiedBakeryCount ?? index.qualifiedBakeryCount,
       divisionTierId: reward.divisionTierId ?? divisionTierId,
       divisionName: reward.divisionName ?? divisionName,
       hasActivityBucket: reward.hasActivityBucket ?? false,
@@ -4013,7 +3265,6 @@ export async function buildCheckReport(identity) {
       rank: reward.rank ?? memberRank,
       leaderboardShare: reward.leaderboardShare ?? 0,
       memberScoreShare: reward.memberScoreShare ?? 0,
-      qualifiedBakeryCount: reward.qualifiedBakeryCount ?? index.qualifiedBakeryCount,
       divisionTierId: reward.divisionTierId ?? divisionTierId,
       divisionName: reward.divisionName ?? divisionName,
       hasActivityBucket: reward.hasActivityBucket ?? false,
@@ -4524,10 +3775,10 @@ function checkPromptText(chat) {
       : 'Send the Rugpull Bakery username or the wallet address in the <code>0x...</code> format.',
     'I will show the estimated reward and profit/loss.',
     '',
-    'Current season: qualified top bakeries split the placement pool by final score.',
+    'Current season: top 10 bakeries split 100% of the ETH prize pool by final score.',
     'Inside a qualified bakery, reward is split by each member score contribution.',
-    'Score follows the public game score; ecosystem reward drawings are separate.',
-    'Costs include exact on-chain bake fees, BoostManager fees, and failed tx fees when explorer API access is available.',
+    'Score follows cookies baked at 1.00x this season; ecosystem reward drawings are separate.',
+    'Costs use exact on-chain bake fees when available.',
   ];
   return promptLines.join('\n');
 }
@@ -4699,17 +3950,10 @@ async function handleMyStatsButton(chatId, userId, messageId = null) {
 
     await handleCheckIdentity(chatId, userId, saved.identity, null, {
       progressMessage: !messageId,
-	      resultExtra: messageId ? { reply_markup: null } : {},
-	      onSuccess: messageId
-	        ? async (result) => {
-	            if (result?.address && !isAddress(saved.identity)) {
-	              await setSavedAccount(userId, result.address).catch((error) => {
-	                console.warn(`Could not upgrade saved account to address for ${userId}: ${error.message}`);
-	              });
-	            }
-	            await editMenuMessage(chatId, messageId, '<b>My stats</b>\n\nDone. The stat card was sent below.', mainMenuInlineMarkup());
-	          }
-	        : null,
+      resultExtra: messageId ? { reply_markup: null } : {},
+      onSuccess: messageId
+        ? () => editMenuMessage(chatId, messageId, '<b>My stats</b>\n\nDone. The stat card was sent below.', mainMenuInlineMarkup())
+        : null,
       onFailure: messageId
         ? (result) => editMenuMessage(chatId, messageId, result.message, noSavedAccountInlineMarkup())
         : null,
@@ -5036,7 +4280,6 @@ async function pollingLoop() {
   await ensureDataDir();
   await loadReportCache();
   await loadCheckIndexCache();
-  await loadCheckStatsCache();
   await loadKnownChats();
   await loadBaselineKnownChats();
   await loadSavedAccounts();
