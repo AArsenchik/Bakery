@@ -2987,6 +2987,17 @@ function isReasonableGasEstimate(value) {
   return Number.isFinite(value) && value >= 0 && value <= fastGasMaxEth();
 }
 
+function normalizeGameplayActionCount(value) {
+  const count = Number(value);
+  if (!Number.isFinite(count) || count < 0) return null;
+  if (count <= fastGasMaxTxCount()) return count;
+
+  const scaledCount = count / 10_000;
+  return scaledCount >= 0 && scaledCount <= fastGasMaxTxCount()
+    ? scaledCount
+    : null;
+}
+
 function hasScaledActionCounters(member) {
   return ['txCount', 'bakedTxCount', 'effectiveTxCount', 'score'].some((field) => {
     const value = Number(member?.[field]);
@@ -2995,17 +3006,12 @@ function hasScaledActionCounters(member) {
 }
 
 function gameplayActionCountFromMember(member) {
-  const bakeTxCount = Number(member?.txCount);
+  const bakeTxCount = normalizeGameplayActionCount(member?.txCount);
   const boostAttempts = Number(member?.boostAttempts ?? 0);
   const rugAttempts = Number(member?.rugAttempts ?? 0);
-  const normalizedBakeTxCount = Number.isFinite(bakeTxCount)
-    && bakeTxCount >= 0
-    && bakeTxCount <= fastGasMaxTxCount()
-    ? bakeTxCount
-    : null;
 
   return {
-    bakeTxCount: normalizedBakeTxCount,
+    bakeTxCount,
     boostActionCount: Math.max(0, (Number.isFinite(boostAttempts) ? boostAttempts : 0) + (Number.isFinite(rugAttempts) ? rugAttempts : 0)),
   };
 }
@@ -3096,17 +3102,26 @@ function refreshBakeTxStatsInBackground(args) {
 async function fetchBakeTxStatsFast(args) {
   const cacheKey = checkStatsCacheKey(args.address, args.seasonId);
   const cached = checkStatsCache.get(cacheKey);
-  if (cached && Date.now() - cached.generatedAtMs <= CHECK_STATS_TTL_MS) {
-    const cachedGas = cached.value?.gasSpentEth;
-    if (!Number.isFinite(cachedGas) || isReasonableGasEstimate(cachedGas)) {
-      return cached.value;
-    }
-  }
-
   const cachedValue = cached && Date.now() - cached.generatedAtMs <= CHECK_STATS_STALE_MS
     ? cached.value
     : null;
   const fastValue = deriveFastTxStatsFromMember(args.member, cachedValue);
+
+  if (cached && Date.now() - cached.generatedAtMs <= CHECK_STATS_TTL_MS) {
+    const cachedGas = cached.value?.gasSpentEth;
+    const cachedTxCount = Number.isFinite(cached.value?.transactionCount)
+      ? cached.value.transactionCount
+      : null;
+    const fastTxCount = Number.isFinite(fastValue.transactionCount)
+      ? fastValue.transactionCount
+      : null;
+    const cacheHasUsefulStats = cachedTxCount !== null || Number.isFinite(cachedGas);
+    const cacheMatchesFastStats = fastTxCount === null || cachedTxCount === fastTxCount;
+
+    if (cacheHasUsefulStats && cacheMatchesFastStats && (!Number.isFinite(cachedGas) || isReasonableGasEstimate(cachedGas))) {
+      return cached.value;
+    }
+  }
 
   if (!shouldRunExactGasRefresh(args.member, cachedValue)) {
     return setCheckStatsCache(cacheKey, fastValue);
