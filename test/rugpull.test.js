@@ -251,6 +251,60 @@ test('renders a grouped score payout report for season 7 without daily score sca
   assert.match(report, /Ecosystem reward drawings are separate from the ETH prize pool/);
 });
 
+test('renders a grouped score payout report for season 8 top-7 score share', () => {
+  const report = renderGroupedScorePayoutReport({
+    agent: {
+      liveState: {
+        marketingSeason: 8,
+        gameplayCaps: {
+          clanMemberCap: 50,
+          bakeryTiers: [
+            { tierId: 1, name: 'Grouped', enabled: true, bakeCooldownBlocks: 5 },
+            { tierId: 2, name: 'Open', enabled: true, bakeCooldownBlocks: 1 },
+          ],
+        },
+      },
+      coreMechanics: {
+        leaderboardsAndPayouts: {
+          scoreFormula: 'score = cookiesBaked * 1.00; no daily score scaler.',
+          scoreSharePlacementPool: {
+            marketingSeason: 8,
+            prizePoolShareBps: 10000,
+            qualifiedBakeryCount: 7,
+            fixedRankPercentages: false,
+          },
+        },
+      },
+    },
+    season: { id: 10, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+    generatedAt: new Date('2026-06-10T10:00:00.000Z'),
+  });
+
+  assert.match(report, /Season 8 payout/);
+  assert.match(report, /Top 7 bakeries qualify by final score/);
+  assert.match(report, /Bakery payout = bakery score \/ top-7 total score \* prize pool/);
+  assert.match(report, /The payout leaderboard is global score-share top 7/);
+  assert.match(report, /Season 8 uses top-7 score-share placement payouts/);
+});
+
+test('falls back to season 8 top-7 config when live agent payout fields are missing', () => {
+  const report = renderGroupedScorePayoutReport({
+    agent: {
+      liveState: {
+        marketingSeason: 8,
+      },
+    },
+    season: { id: 10, prizePool: '10000000000000000000' },
+    ethUsd: 2000,
+    generatedAt: new Date('2026-06-10T10:00:00.000Z'),
+  });
+
+  assert.match(report, /Season 8 payout/);
+  assert.match(report, /Top 7 bakeries qualify by final score/);
+  assert.match(report, /top-7 total score/);
+});
+
 test('prefers division payout model over solo fallback for season 4-style data', () => {
   const payoutModel = detectPayoutModel(
     { liveState: { gameplayCaps: { cookieScale: 10000 } } },
