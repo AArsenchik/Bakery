@@ -3460,6 +3460,16 @@ async function telegramRequest(method, payload) {
   return data.result;
 }
 
+async function ensureTelegramPollingMode() {
+  try {
+    await telegramRequest('deleteWebhook', {
+      drop_pending_updates: false,
+    });
+  } catch (error) {
+    console.warn(`Could not clear Telegram webhook before polling: ${error.message}`);
+  }
+}
+
 async function sendMessage(chatId, text, extra = {}) {
   return telegramRequest('sendMessage', {
     chat_id: chatId,
@@ -4383,6 +4393,7 @@ async function pollingLoop() {
   await loadKnownChats();
   await loadBaselineKnownChats();
   await loadSavedAccounts();
+  await ensureTelegramPollingMode();
   refreshReportCacheInBackground();
   refreshCheckIndexInBackground();
   setInterval(refreshReportCacheInBackground, CACHE_TTL_MS).unref();
